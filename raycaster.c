@@ -41,7 +41,7 @@ int renderW, renderH, halfRenderH;
 #define PATROL_LIGHT_SPEED 0.2f
 #define NUM_LIGHTS  3
 #define PATROL_LIGHTS  (NUM_LIGHTS - 1)
-#define AMBIENT_LIGHT 0.085f
+#define AMBIENT_LIGHT 0.03f
 #define TORCHE_RADIUS 2.8f
 #define TORCHE_PUISSANCE 3.0f
 
@@ -1146,22 +1146,39 @@ void RenderFrame(Context ctx, float px, float py, float angle)
         float row_dist = (float)halfRenderH / fabsf(y - horizon + 0.0001f);
         float fog = 1.0f - fminf(row_dist / 12.0f, 1.0f);
 
+        // Position centrale de la ligne (pour calculer l'éclairage de la ligne)
         float floor_cx = px + cosf(angle) * row_dist;
         float floor_cy = py + sinf(angle) * row_dist;
 
-        float fR = AMBIENT_LIGHT, fG = AMBIENT_LIGHT, fB = AMBIENT_LIGHT; // Ambient light
+        float fR = AMBIENT_LIGHT, fG = AMBIENT_LIGHT, fB = AMBIENT_LIGHT;
+
         for (int i = 0; i < numLights; i++) {
             float ldx   = lights[i].x - floor_cx;
             float ldy   = lights[i].y - floor_cy;
             float dist2 = ldx*ldx + ldy*ldy;
-            float radius2 = lights[i].radius * lights[i].radius;
-            if (dist2 > radius2) continue;
-            float atten = 1.0f - (dist2 / radius2);
-            atten *= atten;
-            fR = fminf(1.0f, fR + lights[i].r * atten);
-            fG = fminf(1.0f, fG + lights[i].g * atten);
-            fB = fminf(1.0f, fB + lights[i].b * atten);
+
+            if (dist2 > lights[i].radius * lights[i].radius) continue;
+
+            float dist = sqrtf(dist2);
+
+            // --- MÊME FORMULE QUE POUR LES MURS ---
+            float Kc = 1.0f;
+            float Kl = 2.0f / lights[i].radius;
+            float Kq = 7.0f / (lights[i].radius * lights[i].radius);
+
+            float atten = 1.0f / (Kc + Kl * dist + Kq * dist2);
+            
+            // Soft fade à la limite du rayon pour éviter les bords nets
+            float fade = 1.0f - (dist / lights[i].radius);
+            float finalAtten = atten * (fade > 0 ? fade : 0);
+
+            fR += lights[i].r * finalAtten;
+            fG += lights[i].g * finalAtten;
+            fB += lights[i].b * finalAtten;
         }
+        
+        // On sature à 1.0 après avoir accumulé toutes les lumières
+        fR = fminf(1.0f, fR); fG = fminf(1.0f, fG); fB = fminf(1.0f, fB);
 
         float rayL = angle - FOV / 2.0f;
         float rayR = angle + FOV / 2.0f;
@@ -1196,27 +1213,27 @@ void RenderFrame(Context ctx, float px, float py, float angle)
     for (int col = 0; col < renderW; col += COL_STEP)
     {
         float ray_angle = angle + (col - renderW / 2.0f) * (FOV / renderW);
-#if DDA_OR_RAYMARCHING
-        RayHit hit = cast_ray_dda(px, py, ray_angle);
-#else
-        RayHit hit = cast_ray_raymarching(px, py, ray_angle, angle);
-#endif
+        #if DDA_OR_RAYMARCHING
+            RayHit hit = cast_ray_dda(px, py, ray_angle);
+        #else
+            RayHit hit = cast_ray_raymarching(px, py, ray_angle, angle);
+        #endif
 
         ctx.zBuffer[col] = hit.dist;
-
         for (int step = 1; step < COL_STEP && (col+step) < renderW; step++)
             ctx.zBuffer[col + step] = hit.dist;
 
         int wall_h_real = (int)(renderH / hit.dist);
         int wall_top    = horizon - wall_h_real / 2;
         int wall_bot    = horizon + wall_h_real / 2;
-        int draw_top    = wall_top < 0       ? 0       : wall_top;
+        int draw_top    = wall_top < 0 ? 0 : wall_top;
         int draw_bot    = wall_bot > renderH ? renderH : wall_bot;
         int texX        = (int)(hit.texX * ctx.texW);
 
         float wx = px + cosf(ray_angle) * hit.dist;
         float wy = py + sinf(ray_angle) * hit.dist;
 
+        // Pré-calcul des lumières pour cette colonne de mur
         typedef struct { float ldx, ldy, ldz, atten, r, g, b; int active; } LightContrib;
         LightContrib lc[8];
         for (int i = 0; i < numLights; i++) {
@@ -1224,17 +1241,29 @@ void RenderFrame(Context ctx, float px, float py, float angle)
             float ldx  = lights[i].x - wx;
             float ldy  = lights[i].y - wy;
             float dist2 = ldx*ldx + ldy*ldy;
+
             if (dist2 > lights[i].radius * lights[i].radius) continue;
+
             float dist = sqrtf(dist2);
-            float ldz  = 0.5f;
+            float ldz  = 0.5f; // Hauteur arbitraire de la source
             float lenL = sqrtf(dist2 + ldz*ldz);
+
             lc[i].ldx   = ldx / lenL;
             lc[i].ldy   = ldy / lenL;
             lc[i].ldz   = ldz / lenL;
-            lc[i].atten = 1.0f - dist / lights[i].radius;
             lc[i].r     = lights[i].r;
             lc[i].g     = lights[i].g;
             lc[i].b     = lights[i].b;
+
+            // --- NOUVELLE ATTÉNUATION QUADRATIQUE ---
+            float Kc = 1.0f;
+            float Kl = 2.0f / lights[i].radius;
+            float Kq = 7.0f / (lights[i].radius * lights[i].radius); 
+            
+            float atten = 1.0f / (Kc + Kl * dist + Kq * dist2);
+            float fade  = 1.0f - (dist / lights[i].radius);
+            
+            lc[i].atten = atten * (fade > 0 ? fade : 0);
             lc[i].active = 1;
         }
 
@@ -1252,13 +1281,17 @@ void RenderFrame(Context ctx, float px, float py, float angle)
             float nny = (n.g / 255.0f) * 2.0f - 1.0f;
             float nnz = (n.b / 255.0f) * 2.0f - 1.0f;
 
-            float light = AMBIENT_LIGHT; // Ambient Light
+            // Calcul de la lumière par canal (RGB) pour plus de réalisme
+            float outR = AMBIENT_LIGHT, outG = AMBIENT_LIGHT, outB = AMBIENT_LIGHT;
+
             for (int i = 0; i < numLights; i++) {
                 if (!lc[i].active) continue;
                 float diff = fmaxf(0.0f, nnx*lc[i].ldx + nny*lc[i].ldy + nnz*lc[i].ldz);
-                light += diff * lc[i].atten * lc[i].r;
+                
+                outR += diff * lc[i].atten * lc[i].r;
+                outG += diff * lc[i].atten * lc[i].g;
+                outB += diff * lc[i].atten * lc[i].b;
             }
-            light = fminf(light, 1.0f);
 
             Color finalColor = s;
             if (hit.wallType == 3) finalColor = MixColor(s, WHITE, 0.5f);
@@ -1266,11 +1299,12 @@ void RenderFrame(Context ctx, float px, float py, float angle)
             if (hit.wallType == 5) finalColor = MixColor(s, GREEN, 0.5f);
             if (hit.wallType == 2) finalColor = MixColor(s, GOLD,  0.7f);
 
+            // Rendu final avec clamp à 255
             for (int step = 0; step < COL_STEP && (col + step) < renderW; step++) {
                 ctx.framebuffer[y * renderW + (col + step)] = (Color){
-                    (unsigned char)(finalColor.r * light),
-                    (unsigned char)(finalColor.g * light),
-                    (unsigned char)(finalColor.b * light),
+                    (unsigned char)fminf(255.0f, finalColor.r * outR),
+                    (unsigned char)fminf(255.0f, finalColor.g * outG),
+                    (unsigned char)fminf(255.0f, finalColor.b * outB),
                     255
                 };
             }
