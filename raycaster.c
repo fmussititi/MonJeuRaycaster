@@ -26,11 +26,11 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.6  // 1 = natif, 2 = moitié, 4 = quart
+#define RENDER_SCALE 1.8  // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 1
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
-#define TEX_TILE 0.9f
+#define TEX_TILE 3.0f
 #define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
 
 // ----- Carte du labyrinthe -----
@@ -121,7 +121,9 @@ typedef struct {
     Color *wallPixels;
     int texW, texH;
     Color *wallNormal;
-    int normW;
+    int normW, normH;
+    Color *wallHeight;
+    int heightW, heightH;
     Color *floorPixels;
     int texFloorW, texFloorH;
     Color *ceilPixels;
@@ -1269,25 +1271,43 @@ void RenderFrame(Context ctx, float px, float py, float angle)
 
         for (int y = draw_top; y < draw_bot; y++)
         {
+            // 1. Calcul du texY de base (commun au calcul de hauteur et au rendu final)
             float texPos = fmodf((float)(y - wall_top) / (float)wall_h_real * TEX_TILE, 1.0f);
             int texY = (int)(texPos * ctx.texH);
             if (texY < 0) texY = 0;
             if (texY >= ctx.texH) texY = ctx.texH - 1;
 
-            Color s = ctx.wallPixels[texY * ctx.texW + texX];
-            Color n = ctx.wallNormal[texY * ctx.normW + texX];
+            // 2. Calcul du Parallax Offset
+            // On utilise le sinus de la différence d'angle : 
+            // Si on regarde de face (diff = 0), l'offset est nul.
+            // Plus on est de biais, plus l'offset grandit.
+            float viewRelAngle = ray_angle - angle;
+            float viewDirFactor = sinf(viewRelAngle); 
 
+            // Lecture de la hauteur (on utilise texX original et texY calculé au dessus)
+            float height = (float)(ctx.wallHeight[texY * ctx.texW + texX].r) / 255.0f;
+
+            float parallaxScale = 0.55f; // Intensité (à ajuster, commence bas)
+            float offset = (height * parallaxScale) * viewDirFactor;
+
+            // 3. Application du décalage sur le X
+            float correctedTexX = hit.texX + offset; 
+            int finalTexX = (int)(correctedTexX * ctx.texW) % ctx.texW;
+            if (finalTexX < 0) finalTexX += ctx.texW;
+
+            // 4. Échantillonnage final avec les coordonnées décalées
+            Color s = ctx.wallPixels[texY * ctx.texW + finalTexX];
+            Color n = ctx.wallNormal[texY * ctx.normW + finalTexX];
+
+            // --- Reste du calcul d'éclairage Normal Mapping ---
             float nnx = (n.r / 255.0f) * 2.0f - 1.0f;
             float nny = (n.g / 255.0f) * 2.0f - 1.0f;
             float nnz = (n.b / 255.0f) * 2.0f - 1.0f;
 
-            // Calcul de la lumière par canal (RGB) pour plus de réalisme
             float outR = AMBIENT_LIGHT, outG = AMBIENT_LIGHT, outB = AMBIENT_LIGHT;
-
             for (int i = 0; i < numLights; i++) {
                 if (!lc[i].active) continue;
                 float diff = fmaxf(0.0f, nnx*lc[i].ldx + nny*lc[i].ldy + nnz*lc[i].ldz);
-                
                 outR += diff * lc[i].atten * lc[i].r;
                 outG += diff * lc[i].atten * lc[i].g;
                 outB += diff * lc[i].atten * lc[i].b;
@@ -1299,7 +1319,6 @@ void RenderFrame(Context ctx, float px, float py, float angle)
             if (hit.wallType == 5) finalColor = MixColor(s, GREEN, 0.5f);
             if (hit.wallType == 2) finalColor = MixColor(s, GOLD,  0.7f);
 
-            // Rendu final avec clamp à 255
             for (int step = 0; step < COL_STEP && (col + step) < renderW; step++) {
                 ctx.framebuffer[y * renderW + (col + step)] = (Color){
                     (unsigned char)fminf(255.0f, finalColor.r * outR),
@@ -1644,6 +1663,13 @@ int main(void)
     Color *wallNormal = LoadImageColors(imgNorm);
     UnloadImage(imgNorm);
 
+    Image imgHeight = LoadImage("Wall2_disp.png");
+    ImageFormat(&imgHeight, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    int heightW = imgHeight.width;
+    int heightH = imgHeight.height;
+    Color *wallHeight = LoadImageColors(imgHeight);
+    UnloadImage(imgHeight);
+
     Image imgFloor = LoadImage("Floor.png");
     ImageFormat(&imgFloor, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
     int texFloorW = imgFloor.width;
@@ -1683,6 +1709,8 @@ int main(void)
     ctx.texW = texW, ctx.texH = texH;
     ctx.wallNormal = wallNormal;
     ctx.normW = normW;
+    ctx.wallHeight = wallHeight;
+    ctx.heightW = heightW, ctx.heightH = heightH;
     ctx.floorPixels = floorPixels;
     ctx.texFloorW = texFloorW, ctx.texFloorH = texFloorH;
     ctx.ceilPixels = ceilPixels;
