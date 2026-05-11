@@ -20,28 +20,30 @@
 int SCREEN_W, SCREEN_H, HALF_H;
 int renderW, renderH, halfRenderH;
 
-// Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
-#define RAY_MARCHING_STEP_SIZE 0.001f;
-
 // ----- Configuration du joueur -----
 #define MOVE_SPEED   3.0f       // cases/seconde
 #define ROT_SPEED    2.5f       // radians/seconde
 #define FOV          (PI / 3)   // 60 degrés
 
-#define RENDER_SCALE 1  // 1 = natif, 2 = moitié, 4 = quart
-#define COL_STEP 1 
+// ------ Parametres de qualite/performance du rendu ------
+#define RENDER_SCALE 1.6  // 1 = natif, 2 = moitié, 4 = quart
+#define COL_STEP 1
+#define FXAA 0
+#define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
+#define TEX_TILE 0.7f
+#define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
 
 // ----- Carte du labyrinthe -----
 // 1 = mur, 0 = couloir
 #define MAP_W  29
 #define MAP_H  29
 
-#define TEX_TILE 1.0f
-
-#define LIGHT_SPEED 0.2f
+#define PATROL_LIGHT_SPEED 0.2f
 #define NUM_LIGHTS  3
 #define PATROL_LIGHTS  (NUM_LIGHTS - 1)
-#define AMBIENT_LIGHT 0.01f
+#define AMBIENT_LIGHT 0.091f
+#define TORCHE_RADIUS 2.8f
+#define TORCHE_PUISSANCE 3.0f
 
 static int MAP[MAP_H][MAP_W];
 // 0.0 = pas de trace, 1.0 = trace toute fraîche
@@ -96,8 +98,8 @@ typedef struct {
 } MouvingLight;
 
 Light lights[] = {
-    { 3.5f, 3.5f, 1.0f, 0.8f, 0.2f, 1.5f },   // lumière patrol chaude
-    { 10.f, 5.0f, 0.2f, 0.5f, 1.0f, 1.5f },   // lumière patrol froide
+    { 3.5f, 3.5f, 1.0f, 1.0f, 0.2f, 1.5f },   // lumière patrol chaude
+    { 10.f, 5.0f, 1.0f, 1.0f, 1.0f, 1.5f },   // lumière patrol froide
     { 0 }
 };
 int numLights = NUM_LIGHTS;
@@ -755,7 +757,7 @@ Sound CreateTada(void)
 Sound CreateSiren(void)
 {
     int sampleRate  = 44100;
-    float duration  = 1.5f;
+    float duration  = 4.5f;
     int sampleCount = (int)(sampleRate * duration);
     float *samples  = malloc(sampleCount * sizeof(float));
 
@@ -1185,8 +1187,11 @@ void RenderFrame(Context ctx, float px, float py, float angle)
     for (int col = 0; col < renderW; col += COL_STEP)
     {
         float ray_angle = angle + (col - renderW / 2.0f) * (FOV / renderW);
-        //RayHit hit = cast_ray_dda(px, py, ray_angle);
+#if DDA_OR_RAYMARCHING
+        RayHit hit = cast_ray_dda(px, py, ray_angle);
+#else
         RayHit hit = cast_ray_raymarching(px, py, ray_angle, angle);
+#endif
 
         ctx.zBuffer[col] = hit.dist;
 
@@ -1382,8 +1387,8 @@ void RenderSprites(Context ctx, float px, float py, float angle)
 void AnimLights(float px, float py, float dt) {
     for (int i = 0; i < PATROL_LIGHTS; i++) {
 
-        float nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * LIGHT_SPEED;
-        float nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * LIGHT_SPEED;
+        float nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * PATROL_LIGHT_SPEED;
+        float nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * PATROL_LIGHT_SPEED;
 
         int gx = (int)nextX;
         int gy = (int)nextY;
@@ -1409,8 +1414,8 @@ void AnimLights(float px, float py, float dt) {
             }
 
             // Recalcul depuis la position snappée
-            nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * LIGHT_SPEED;
-            nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * LIGHT_SPEED;
+            nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * PATROL_LIGHT_SPEED;
+            nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * PATROL_LIGHT_SPEED;
             gx = (int)nextX;
             gy = (int)nextY;
 
@@ -1442,8 +1447,8 @@ void AnimLights(float px, float py, float dt) {
             if (patrolLights[i].dy != 0)  // mouvement vertical → centrer X dans nouvelle case
                 patrolLights[i].l->x = gx + 0.5f;
 
-            nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * LIGHT_SPEED;
-            nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * LIGHT_SPEED;
+            nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * PATROL_LIGHT_SPEED;
+            nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * PATROL_LIGHT_SPEED;
 
             patrolLights[i].lastGridX = gx;
             patrolLights[i].lastGridY = gy;
@@ -1455,8 +1460,8 @@ void AnimLights(float px, float py, float dt) {
 
     lights[2].x = px;
     lights[2].y = py;
-    lights[2].r = 2.0f; lights[2].g = 2.0f; lights[2].b = 2.0f;
-    if (torcheOn) lights[2].radius = 2.8f;
+    lights[2].r = TORCHE_PUISSANCE; lights[2].g = TORCHE_PUISSANCE; lights[2].b = TORCHE_PUISSANCE;
+    if (torcheOn) lights[2].radius = TORCHE_RADIUS;
     else lights[2].radius = 0.0f;
 }
 
@@ -1578,6 +1583,7 @@ int main(void)
     UnloadImage(imgCeil);
 
     Image imgSprite = LoadImage("Ghost.png");  // ton sprite
+    //Image imgSprite = LoadImage("Flame.png");  // ton sprite
     ImageFormat(&imgSprite, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
     int spriteW = imgSprite.width;
     int spriteH = imgSprite.height;
@@ -1661,6 +1667,9 @@ int main(void)
 
         RenderFrame(ctx, px, py, angle);
         RenderSprites(ctx, px, py, angle);
+#if FXAA
+        apply_fxaa(ctx.framebuffer, ctx.tmpFxaa, renderW, renderH);
+#endif
         UpdateTexture(ctx.screenTex, ctx.framebuffer);
         DrawTexturePro(
             ctx.screenTex,
