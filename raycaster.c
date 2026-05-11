@@ -30,7 +30,7 @@ int renderW, renderH, halfRenderH;
 #define COL_STEP 1
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
-#define TEX_TILE 0.7f
+#define TEX_TILE 0.9f
 #define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
 
 // ----- Carte du labyrinthe -----
@@ -41,9 +41,14 @@ int renderW, renderH, halfRenderH;
 #define PATROL_LIGHT_SPEED 0.2f
 #define NUM_LIGHTS  3
 #define PATROL_LIGHTS  (NUM_LIGHTS - 1)
-#define AMBIENT_LIGHT 0.091f
+#define AMBIENT_LIGHT 0.085f
 #define TORCHE_RADIUS 2.8f
 #define TORCHE_PUISSANCE 3.0f
+
+// Paramètres bloom des sprites light patrols
+#define BLOOM_PASSES  7      // nombre de passes (1 = pas de bloom)
+#define BLOOM_SPREAD  2      // écartement en pixels
+#define BLOOM_ALPHA   0.3f   // intensité du halo
 
 static int MAP[MAP_H][MAP_W];
 // 0.0 = pas de trace, 1.0 = trace toute fraîche
@@ -56,6 +61,7 @@ bool torcheOn = true;
 bool traceOn = false;
 float pitch = 0.0f;
 bool playSoundOneTime = true;
+bool noBeepSound = false;
 
 typedef enum { STATE_PLAY, STATE_WIN, STATE_LOST, STATE_MAZE_NOT_READY } GameState;
 GameState gameState = STATE_PLAY;
@@ -99,7 +105,7 @@ typedef struct {
 
 Light lights[] = {
     { 3.5f, 3.5f, 1.0f, 1.0f, 0.2f, 1.5f },   // lumière patrol chaude
-    { 10.f, 5.0f, 1.0f, 1.0f, 1.0f, 1.5f },   // lumière patrol froide
+    { 10.f, 5.0f, 0.3f, 0.3f, 1.0f, 1.5f },   // lumière patrol froide
     { 0 }
 };
 int numLights = NUM_LIGHTS;
@@ -827,7 +833,7 @@ Sound CreateBeep(void) {
 
 void BeepDependsOnExitDistance(Sound beep, int px, int py)
 {
-    if (gameState != STATE_PLAY)
+    if (gameState != STATE_PLAY || noBeepSound)
         return;
 
     // 1. Trouver les coordonnées de la sortie (à faire une fois au GenerateMap)
@@ -975,6 +981,9 @@ void KeysAndJoypadHandler(float* angle, float* px, float* py, float dt)
 
     if (IsKeyPressed(KEY_B))
         afficherMap = !afficherMap;
+
+    if (IsKeyPressed(KEY_P))
+        noBeepSound = !noBeepSound;
 
     // --- Contrôle de la Torche ---
     // On utilise le bouton Y (ou triangle) par exemple
@@ -1349,32 +1358,65 @@ void RenderSprites(Context ctx, float px, float py, float angle)
             ? (Color){255, 200,  50, 255}
             : (Color){ 50, 150, 255, 255};
 
-        for (int col = drawStartX; col < drawEndX; col++)
+        for (int pass = 0; pass <= BLOOM_PASSES; pass++)
         {
-            if (col < 0 || col >= renderW) continue;
+            // Pass 0 = sprite normal, passes suivantes = halo décalé
+            int offsets[8][2] = {
+                {0,0},
+                {-BLOOM_SPREAD, 0}, {BLOOM_SPREAD, 0},
+                {0, -BLOOM_SPREAD}, {0,  BLOOM_SPREAD},
+                {-BLOOM_SPREAD,-BLOOM_SPREAD}, {BLOOM_SPREAD,-BLOOM_SPREAD},
+                {-BLOOM_SPREAD, BLOOM_SPREAD}
+            };
+            int ox = (pass == 0) ? 0 : offsets[pass][0];
+            int oy = (pass == 0) ? 0 : offsets[pass][1];
+            float passAlpha = (pass == 0) ? 1.0f : BLOOM_ALPHA;
 
-            int texX = (int)((float)(col - drawStartX) / (float)(drawEndX - drawStartX) * ctx.spriteW);
-            if (texX < 0) texX = 0;
-            if (texX >= ctx.spriteW) texX = ctx.spriteW - 1;
-
-            if (spriteDist >= ctx.zBuffer[col]) continue;
-
-            for (int row = drawStartY; row < drawEndY; row++)
+            for (int col = drawStartX; col < drawEndX; col++)
             {
-                int texY = (int)((float)(row - drawStartY) / (float)(drawEndY - drawStartY) * ctx.spriteH);
-                if (texY < 0) texY = 0;
-                if (texY >= ctx.spriteH) texY = ctx.spriteH - 1;
+                if (col < 0 || col >= renderW) continue;
 
-                Color c = ctx.spritePixels[texY * ctx.spriteW + texX];
-                if (c.a < 128) continue;
+                int texX = (int)((float)(col - drawStartX) / (float)(drawEndX - drawStartX) * ctx.spriteW);
+                if (texX < 0) texX = 0;
+                if (texX >= ctx.spriteW) texX = ctx.spriteW - 1;
 
-                float fog = 1.0f - fminf(spriteDist / 12.0f, 1.0f);
-                ctx.framebuffer[row * renderW + col] = (Color){
-                    (unsigned char)(c.r * tint.r / 255.0f * fog),
-                    (unsigned char)(c.g * tint.g / 255.0f * fog),
-                    (unsigned char)(c.b * tint.b / 255.0f * fog),
-                    255
-                };
+                if (spriteDist >= ctx.zBuffer[col]) continue;
+
+                for (int row = drawStartY; row < drawEndY; row++)
+                {
+                    int texY = (int)((float)(row - drawStartY) / (float)(drawEndY - drawStartY) * ctx.spriteH);
+                    if (texY < 0) texY = 0;
+                    if (texY >= ctx.spriteH) texY = ctx.spriteH - 1;
+
+                    Color c = ctx.spritePixels[texY * ctx.spriteW + texX];
+                    if (c.a < 128) continue;
+
+                    float fog = 1.0f - fminf(spriteDist / 12.0f, 1.0f);
+
+                    int destCol = col + ox;
+                    int destRow = row + oy;
+                    if (destCol < 0 || destCol >= renderW) continue;
+                    if (destRow < 0 || destRow >= renderH) continue;
+
+                    // Pour le halo : additionner sur le framebuffer existant
+                    if (pass == 0) {
+                        ctx.framebuffer[destRow * renderW + destCol] = (Color){
+                            (unsigned char)(c.r * tint.r / 255.0f * fog),
+                            (unsigned char)(c.g * tint.g / 255.0f * fog),
+                            (unsigned char)(c.b * tint.b / 255.0f * fog),
+                            255
+                        };
+                    } else {
+                        // Additive blending sur le framebuffer
+                        Color dst = ctx.framebuffer[destRow * renderW + destCol];
+                        ctx.framebuffer[destRow * renderW + destCol] = (Color){
+                            (unsigned char)fminf(255, dst.r + c.r * tint.r / 255.0f * fog * passAlpha),
+                            (unsigned char)fminf(255, dst.g + c.g * tint.g / 255.0f * fog * passAlpha),
+                            (unsigned char)fminf(255, dst.b + c.b * tint.b / 255.0f * fog * passAlpha),
+                            255
+                        };
+                    }
+                }
             }
         }
     }
