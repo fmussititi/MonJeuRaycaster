@@ -932,7 +932,7 @@ void KeysAndJoypadHandler(float* angle, float* px, float* py, float dt)
         float axisRX = GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_X);
 
         // Zone morte (évite les drifts)
-        const float DEADZONE = 0.15f;
+        const float DEADZONE = 0.25f;
 
         // Avancer/reculer (axe Y du joystick gauche)
         if (fabsf(axisY) > DEADZONE) {
