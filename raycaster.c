@@ -27,13 +27,14 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
-#define COL_STEP 1
+#define RENDER_SCALE 1.3 // 1 = natif, 2 = moitié, 4 = quart
+#define COL_STEP 2
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
 #define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
 #define NUM_THREADS 8
+#define OPTIMISATION_STEEP_PARALLAX 0
 
 // ----- Carte du labyrinthe -----
 // 1 = mur, 0 = couloir
@@ -45,7 +46,7 @@ int renderW, renderH, halfRenderH;
 #define PATROL_LIGHTS  (NUM_LIGHTS - 1)
 #define AMBIENT_LIGHT 0.03f
 #define TORCHE_RADIUS 2.8f
-#define TORCHE_PUISSANCE 1.5f
+#define TORCHE_PUISSANCE 2.0f
 
 // Paramètres bloom des sprites light patrols
 #define BLOOM_PASSES  7      // nombre de passes (1 = pas de bloom)
@@ -835,39 +836,56 @@ Sound CreateTada(void)
 Sound CreateSiren(void)
 {
     int sampleRate  = 44100;
-    float duration  = 4.0f; // Durée exacte demandée
+    float duration  = 4.0f;
     int sampleCount = (int)(sampleRate * duration);
     float *samples  = malloc(sampleCount * sizeof(float));
 
-    float freqStart = 880.0f; 
-    float freqEnd   = 110.0f; // Descente plus profonde pour l'effet
-    
-    float phase = 0.0f;
+    // --- Paramètres du Pitch Global (Le Decay) ---
+    float baseFreqStart = 880.0f; // Commence haut (La4)
+    float baseFreqEnd   = 220.0f; // Finit bas (La2)
+    float amplitude     = 150.0f; // Oscillation autour de la base (+/- 150Hz)
+
+    // --- Paramètres du Rythme (LFO) ---
+    float modFreqStart  = 5.0f;   // 5 "cycles" par seconde (plus rapide)
+    float modFreqEnd    = 1.0f;   // Ralentit jusqu'à 1 cycle par seconde
+
+    float phaseSound = 0.0f;
+    float phaseMod   = 0.0f;
 
     for (int i = 0; i < sampleCount; i++)
     {
         float prog = (float)i / sampleCount;
 
-        // Calcul de la fréquence actuelle (glissando linéaire)
-        float currentFreq = freqStart + (freqEnd - freqStart) * prog;
+        // 1. Le Decay Global : La note centrale descend
+        float currentBaseFreq = baseFreqStart + (baseFreqEnd - baseFreqStart) * prog;
 
-        // Accumulation de la phase pour éviter les craquements et distorsions
-        // Formule : phase += 2 * PI * f / sampleRate
-        phase += (2.0f * PI * currentFreq) / (float)sampleRate;
+        // 2. Le LFO : La vitesse de l'oscillation ralentit
+        float currentModFreq = modFreqStart + (modFreqEnd - modFreqStart) * prog;
         
-        // On garde la phase sous 2*PI pour la précision flottante
-        if (phase > 2.0f * PI) phase -= 2.0f * PI;
+        phaseMod += (2.0f * PI * currentModFreq) / (float)sampleRate;
+        if (phaseMod > 2.0f * PI) phaseMod -= 2.0f * PI;
 
-        // Enveloppe simple pour éviter le "clic" au début et à la fin
-        float env = 1.0f;
-        if (i < 1000) env = (float)i / 1000.0f;
-        if (i > sampleCount - 4000) env = (float)(sampleCount - i) / 4000.0f;
+        // 3. Calcul du Pitch Final 
+        // Fréquence de base qui descend + l'oscillation sinusoïdale
+        float currentPitch = currentBaseFreq + (sinf(phaseMod) * amplitude);
 
-        // Synthèse additive (Carrée adoucie)
-        samples[i] = env * (
-            0.5f * sinf(phase) +          // Fondamentale
-            0.2f * sinf(phase * 3.0f) +   // Harmonique 3
-            0.1f * sinf(phase * 5.0f)     // Harmonique 5
+        // Sécurité : on évite les fréquences négatives ou trop basses
+        if (currentPitch < 20.0f) currentPitch = 20.0f;
+
+        // 4. Accumulation de la phase sonore
+        phaseSound += (2.0f * PI * currentPitch) / (float)sampleRate;
+        if (phaseSound > 2.0f * PI) phaseSound -= 2.0f * PI;
+
+        // 5. Enveloppe de volume (Fade out final pour la propreté)
+        float volumeEnv = 1.0f;
+        if (i > sampleCount - 4000) 
+            volumeEnv = (float)(sampleCount - i) / 4000.0f;
+
+        // Rendu : Signal riche en harmoniques (type onde de scie/carrée adoucie)
+        samples[i] = volumeEnv * (
+            0.5f * sinf(phaseSound) + 
+            0.2f * sinf(phaseSound * 2.0f) + 
+            0.1f * sinf(phaseSound * 3.0f)
         );
     }
 
@@ -880,7 +898,7 @@ Sound CreateSiren(void)
     };
     
     Sound sound = LoadSoundFromWave(wave);
-    free(samples); 
+    free(samples);
     return sound;
 }
 
@@ -1319,7 +1337,9 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             float viewFactor = fabsf(sinf(viewRelAngle));
             Color s,n;
 
-            if (viewFactor > 0.01f) {
+#if OPTIMISATION_STEEP_PARALLAX
+            if (viewFactor > 0.12f) {
+#endif
                 float tangentView;
                 if (hit.side == 0)
                     tangentView = sinf(ray_angle);
@@ -1375,11 +1395,13 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
                 // 4. Échantillonnage final avec les coordonnées décalées
                 s = ctx->wallPixels[texY * ctx->texW + finalTexX];
                 n = ctx->wallNormal[texY * ctx->normW + finalTexX];
+#if OPTIMISATION_STEEP_PARALLAX
             }
             else {
                 s = ctx->wallPixels[texY * ctx->texW + texX];
                 n = ctx->wallNormal[texY * ctx->normW + texX];
             }
+#endif
 
             // --- Reste du calcul d'éclairage Normal Mapping ---
             float nnx = (n.r / 255.0f) * 2.0f - 1.0f;
