@@ -13,7 +13,8 @@
 			"-o", "raycaster.exe",
 			"-static", "-static-libgcc", "-static-libstdc++",
 			"-L", "F:/C++/raylib-6.0/lib",
-			"-lraylib", "-lwinmm", "-lgdi32", "-lopengl32", "-luser32", "-lkernel32"
+			"-lraylib", "-lwinmm", "-lgdi32", "-lopengl32", "-luser32", "-lkernel32",
+			"-lpthread"
 			],
 			"options": {
 				"cwd": "${workspaceFolder}"
