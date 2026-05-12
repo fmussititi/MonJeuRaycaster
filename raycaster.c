@@ -26,11 +26,11 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.8  // 1 = natif, 2 = moitié, 4 = quart
+#define RENDER_SCALE 2  // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 1
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
-#define TEX_TILE 3.0f
+#define TEX_TILE 2.0f
 #define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
 
 // ----- Carte du labyrinthe -----
@@ -1276,28 +1276,102 @@ void RenderFrame(Context ctx, float px, float py, float angle)
             int texY = (int)(texPos * ctx.texH);
             if (texY < 0) texY = 0;
             if (texY >= ctx.texH) texY = ctx.texH - 1;
-
+/*
             // 2. Calcul du Parallax Offset
-            // On utilise le sinus de la différence d'angle : 
-            // Si on regarde de face (diff = 0), l'offset est nul.
-            // Plus on est de biais, plus l'offset grandit.
             float viewRelAngle = ray_angle - angle;
-            float viewDirFactor = sinf(viewRelAngle); 
+            float viewDirFactor = fabsf(sinf(viewRelAngle)); 
 
             // Lecture de la hauteur (on utilise texX original et texY calculé au dessus)
             float height = (float)(ctx.wallHeight[texY * ctx.texW + texX].r) / 255.0f;
 
-            float parallaxScale = 0.55f; // Intensité (à ajuster, commence bas)
-            float offset = (height * parallaxScale) * viewDirFactor;
+            // centrer la heightmap
+            float h = height - 0.5f;
 
-            // 3. Application du décalage sur le X
-            float correctedTexX = hit.texX + offset; 
-            int finalTexX = (int)(correctedTexX * ctx.texW) % ctx.texW;
-            if (finalTexX < 0) finalTexX += ctx.texW;
+            float tangentView;
+            if (hit.side == 0)
+                tangentView = sinf(ray_angle);
+            else
+                tangentView = cosf(ray_angle);
 
-            // 4. Échantillonnage final avec les coordonnées décalées
-            Color s = ctx.wallPixels[texY * ctx.texW + finalTexX];
-            Color n = ctx.wallNormal[texY * ctx.normW + finalTexX];
+            float parallaxScale = 0.25f;
+
+            // inversion du signe
+            float offset = -h * tangentView * parallaxScale * viewDirFactor;
+
+            float correctedTexX = hit.texX + offset;
+
+            // wrap
+            correctedTexX -= floorf(correctedTexX);
+
+            int finalTexX = (int)(correctedTexX * ctx.texW);
+*/
+
+            // 2. Calcul du Steep Parallax
+            float viewRelAngle = ray_angle - angle;
+            float viewFactor = fabsf(sinf(viewRelAngle));
+            Color s,n;
+
+            if (viewFactor > 0.06f) {
+                float tangentView;
+                if (hit.side == 0)
+                    tangentView = sinf(ray_angle);
+                else
+                    tangentView = cosf(ray_angle);
+
+                // Intensité globale
+                float parallaxScale = 0.1f;
+
+                // Nombre de couches
+                int numLayers = 128;
+
+                // Taille d'une couche
+                float layerDepth = 1.0f / numLayers;
+
+                // Direction UV
+                float deltaTexX =
+                    tangentView *
+                    parallaxScale *
+                    viewFactor /
+                    (fmaxf(hit.dist, 0.5f) * numLayers);
+
+                // UV courant
+                float currentTexX = hit.texX;
+
+                // profondeur accumulée
+                float currentLayerDepth = 0.0f;
+
+                // hauteur sample
+                float currentHeight = 1.0f;
+
+                for (int i = 0; i < numLayers; i++)
+                {
+                    currentTexX -= deltaTexX;
+
+                    currentTexX -= floorf(currentTexX);
+
+                    int sampleX = (int)(currentTexX * ctx.texW);
+                    if (sampleX < 0) sampleX = 0;
+                    if (sampleX >= ctx.texW) sampleX = ctx.texW - 1;
+
+                    currentHeight =
+                        ctx.wallHeight[texY * ctx.texW + sampleX].r / 255.0f;
+
+                    currentLayerDepth += layerDepth;
+
+                    if (currentLayerDepth >= currentHeight)
+                        break;
+                }
+
+                int finalTexX = (int)(currentTexX * ctx.texW);
+
+                // 4. Échantillonnage final avec les coordonnées décalées
+                s = ctx.wallPixels[texY * ctx.texW + finalTexX];
+                n = ctx.wallNormal[texY * ctx.normW + finalTexX];
+            }
+            else {
+                s = ctx.wallPixels[texY * ctx.texW + texX];
+                n = ctx.wallNormal[texY * ctx.normW + texX];
+            }
 
             // --- Reste du calcul d'éclairage Normal Mapping ---
             float nnx = (n.r / 255.0f) * 2.0f - 1.0f;
