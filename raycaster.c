@@ -27,14 +27,13 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.3 // 1 = natif, 2 = moitié, 4 = quart
+#define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 2
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
 #define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
 #define NUM_THREADS 8
-#define OPTIMISATION_STEEP_PARALLAX 0
 
 // ----- Carte du labyrinthe -----
 // 1 = mur, 0 = couloir
@@ -45,8 +44,8 @@ int renderW, renderH, halfRenderH;
 #define NUM_LIGHTS  3
 #define PATROL_LIGHTS  (NUM_LIGHTS - 1)
 #define AMBIENT_LIGHT 0.03f
-#define TORCHE_RADIUS 2.8f
-#define TORCHE_PUISSANCE 2.0f
+#define TORCHE_RADIUS 1.8f
+#define TORCHE_PUISSANCE 1.5f
 
 // Paramètres bloom des sprites light patrols
 #define BLOOM_PASSES  7      // nombre de passes (1 = pas de bloom)
@@ -192,7 +191,7 @@ void ResetGame(float *px, float *py);
 static inline Color MixColor(Color a, Color b, float t);
 void ComputeDeadEndBranches(void);
 void RenderFrame(Context ctx, float px, float py, float angle);
-void AnimLights(float px, float py, float dt);
+void AnimLights(float px, float py, float angle, float dt);
 void GState(GameState gameState, float* px, float* py, Sound tada, Sound siren);
 void RenderSprites(Context ctx, float px, float py, float angle);
 void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float angle, int horizon);
@@ -1233,7 +1232,7 @@ void draw_minimap(float px, float py, float angle)
 
 
 // =============================================================
-//  Fonction de rendu à utiliser dans main
+//  Fonction de rendu à utiliser dans RenderFrame
 // =============================================================
 
 void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float angle, int horizon){
@@ -1302,16 +1301,15 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             int texY = (int)(texPos * ctx->texH);
             if (texY < 0) texY = 0;
             if (texY >= ctx->texH) texY = ctx->texH - 1;
-/*
-            // 2. Calcul du Parallax Offset
+
+            // 2. Calcul du Steep Parallax
             float viewRelAngle = ray_angle - angle;
-            float viewDirFactor = fabsf(sinf(viewRelAngle)); 
+            float viewFactor = fabsf(tanf(viewRelAngle));
+            viewFactor = fminf(viewFactor, 8.0f);
 
-            // Lecture de la hauteur (on utilise texX original et texY calculé au dessus)
-            float height = (float)(ctx.wallHeight[texY * ctx.texW + texX].r) / 255.0f;
-
-            // centrer la heightmap
-            float h = height - 0.5f;
+            // Layers dynamiques
+            int numLayers = 24 + (int)(viewFactor * viewFactor * 96);
+            Color s,n;
 
             float tangentView;
             if (hit.side == 0)
@@ -1319,89 +1317,96 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             else
                 tangentView = cosf(ray_angle);
 
-            float parallaxScale = 0.25f;
+            // Intensité globale
+            float parallaxScale = 0.15f;
 
-            // inversion du signe
-            float offset = -h * tangentView * parallaxScale * viewDirFactor;
+            // Nombre de couches
+            //int numLayers = 128;
 
-            float correctedTexX = hit.texX + offset;
+            // Taille d'une couche
+            float layerDepth = 1.0f / numLayers;
 
-            // wrap
-            correctedTexX -= floorf(correctedTexX);
+            // Direction UV
+            float deltaTexX =
+                tangentView *
+                parallaxScale *
+                viewFactor /
+                (fmaxf(hit.dist, 0.5f) * numLayers);
 
-            int finalTexX = (int)(correctedTexX * ctx.texW);
-*/
+            // UV courant
+            float currentTexX = hit.texX;
 
-            // 2. Calcul du Steep Parallax
-            float viewRelAngle = ray_angle - angle;
-            float viewFactor = fabsf(sinf(viewRelAngle));
-            Color s,n;
+            // profondeur accumulée
+            float currentLayerDepth = 0.0f;
 
-#if OPTIMISATION_STEEP_PARALLAX
-            if (viewFactor > 0.12f) {
-#endif
-                float tangentView;
-                if (hit.side == 0)
-                    tangentView = sinf(ray_angle);
-                else
-                    tangentView = cosf(ray_angle);
+            // hauteur sample
+            float currentHeight = 1.0f;
 
-                // Intensité globale
-                float parallaxScale = 0.2f;
+            float prevTexX = currentTexX;
+            float prevHeight = currentHeight;
+            float prevLayerDepth = currentLayerDepth;
 
-                // Nombre de couches
-                int numLayers = 128;
+            for (int i = 0; i < numLayers; i++)
+            {
+                prevTexX = currentTexX;
+                prevHeight = currentHeight;
+                prevLayerDepth = currentLayerDepth;
 
-                // Taille d'une couche
-                float layerDepth = 1.0f / numLayers;
+                currentTexX -= deltaTexX;
 
-                // Direction UV
-                float deltaTexX =
-                    tangentView *
-                    parallaxScale *
-                    viewFactor /
-                    (fmaxf(hit.dist, 0.5f) * numLayers);
+                currentTexX -= floorf(currentTexX);
 
-                // UV courant
-                float currentTexX = hit.texX;
+                int sampleX = (int)(currentTexX * ctx->texW);
+                if (sampleX < 0) sampleX = 0;
+                if (sampleX >= ctx->texW) sampleX = ctx->texW - 1;
 
-                // profondeur accumulée
-                float currentLayerDepth = 0.0f;
+                currentHeight =
+                    ctx->wallHeight[texY * ctx->texW + sampleX].r / 255.0f;
 
-                // hauteur sample
-                float currentHeight = 1.0f;
+                currentLayerDepth += layerDepth;
 
-                for (int i = 0; i < numLayers; i++)
-                {
-                    currentTexX -= deltaTexX;
-
-                    currentTexX -= floorf(currentTexX);
-
-                    int sampleX = (int)(currentTexX * ctx->texW);
-                    if (sampleX < 0) sampleX = 0;
-                    if (sampleX >= ctx->texW) sampleX = ctx->texW - 1;
-
-                    currentHeight =
-                        ctx->wallHeight[texY * ctx->texW + sampleX].r / 255.0f;
-
-                    currentLayerDepth += layerDepth;
-
-                    if (currentLayerDepth >= currentHeight)
-                        break;
-                }
-
-                int finalTexX = (int)(currentTexX * ctx->texW);
-
-                // 4. Échantillonnage final avec les coordonnées décalées
-                s = ctx->wallPixels[texY * ctx->texW + finalTexX];
-                n = ctx->wallNormal[texY * ctx->normW + finalTexX];
-#if OPTIMISATION_STEEP_PARALLAX
+                if (currentLayerDepth >= currentHeight)
+                    break;
             }
-            else {
-                s = ctx->wallPixels[texY * ctx->texW + texX];
-                n = ctx->wallNormal[texY * ctx->normW + texX];
-            }
-#endif
+
+            float afterDepth =
+                currentHeight - currentLayerDepth;
+
+            float beforeDepth =
+                prevHeight - prevLayerDepth;
+
+            float denom =
+                afterDepth - beforeDepth;
+
+            float weight = 0.0f;
+
+            if (fabsf(denom) > 0.0001f)
+                weight = afterDepth / denom;
+
+            weight = fmaxf(0.0f, fminf(1.0f, weight));
+
+            float finalTexXf =
+                prevTexX * weight +
+                currentTexX * (1.0f - weight);
+
+            // wrap sécurité
+            finalTexXf -= floorf(finalTexXf);
+
+            int finalTexX =
+                (int)(finalTexXf * ctx->texW);
+
+            // clamp sécurité
+            if (finalTexX < 0)
+                finalTexX = 0;
+
+            if (finalTexX >= ctx->texW)
+                finalTexX = ctx->texW - 1;
+
+            //int finalTexX = (int)(currentTexX * ctx->texW);
+            
+            // 4. Échantillonnage final avec les coordonnées décalées
+            s = ctx->wallPixels[texY * ctx->texW + finalTexX];
+            n = ctx->wallNormal[texY * ctx->normW + finalTexX];
 
             // --- Reste du calcul d'éclairage Normal Mapping ---
             float nnx = (n.r / 255.0f) * 2.0f - 1.0f;
@@ -1411,10 +1416,44 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             float outR = AMBIENT_LIGHT, outG = AMBIENT_LIGHT, outB = AMBIENT_LIGHT;
             for (int i = 0; i < numLights; i++) {
                 if (!lc[i].active) continue;
+
+                float shadow = 1.0f;
+
+                float lightDirX =
+                    (hit.side == 0)
+                    ? lc[i].ldx
+                    : lc[i].ldy;
+
+                float shadowTexX = finalTexXf;
+                float shadowHeight = currentHeight;
+
+                for (int sstep = 0; sstep < 8; sstep++)
+                {
+                    shadowTexX += lightDirX * 0.008f;
+
+                    shadowTexX -= floorf(shadowTexX);
+
+                    int sx = (int)(shadowTexX * ctx->texW);
+
+                    if (sx < 0) sx = 0;
+                    if (sx >= ctx->texW) sx = ctx->texW - 1;
+
+                    float sampleHeight =
+                        ctx->wallHeight[texY * ctx->texW + sx].r / 255.0f;
+
+                    if (sampleHeight > shadowHeight + 0.02f)
+                    {
+                        shadow = 0.5f;
+                        break;
+                    }
+
+                    shadowHeight += 0.015f;
+                }
+
                 float diff = fmaxf(0.0f, nnx*lc[i].ldx + nny*lc[i].ldy + nnz*lc[i].ldz);
-                outR += diff * lc[i].atten * lc[i].r;
-                outG += diff * lc[i].atten * lc[i].g;
-                outB += diff * lc[i].atten * lc[i].b;
+                outR += diff * shadow * lc[i].atten * lc[i].r;
+                outG += diff * shadow * lc[i].atten * lc[i].g;
+                outB += diff * shadow * lc[i].atten * lc[i].b;
             }
 
             Color finalColor = s;
@@ -1434,6 +1473,11 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
         }
     }
 }
+
+
+// =============================================================
+//  Fonction de rendu à utiliser dans RenderFrame
+// =============================================================
 
 void RenderFloorCeil(Context* ctx, float px, float py, float angle, int horizon){
     // Sol/plafond par ligne
@@ -1507,6 +1551,10 @@ void RenderFloorCeil(Context* ctx, float px, float py, float angle, int horizon)
     }
 }
 
+
+// =============================================================
+//  Fonction RenderFrame multithreads
+// =============================================================
 void RenderFrame(Context ctx, float px, float py, float angle)
 {
     memset(ctx.framebuffer, 0, renderW * renderH * sizeof(Color));
@@ -1678,7 +1726,7 @@ void RenderSprites(Context ctx, float px, float py, float angle)
 //  Gestion de l'animation des lumières
 // =============================================================
 
-void AnimLights(float px, float py, float dt) {
+void AnimLights(float px, float py, float angle, float dt) {
     for (int i = 0; i < PATROL_LIGHTS; i++) {
 
         float nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * PATROL_LIGHT_SPEED;
@@ -1752,11 +1800,14 @@ void AnimLights(float px, float py, float dt) {
         patrolLights[i].l->y = nextY;
     }
 
-    lights[2].x = px;
-    lights[2].y = py;
-    lights[2].r = TORCHE_PUISSANCE; lights[2].g = TORCHE_PUISSANCE; lights[2].b = TORCHE_PUISSANCE;
-    if (torcheOn) lights[2].radius = TORCHE_RADIUS;
-    else lights[2].radius = 0.0f;
+    float offset = 1.0f;
+    if (torcheOn){
+        lights[2].x = px + cosf(angle) * offset;
+        lights[2].y = py + sinf(angle) * offset;
+        lights[2].r = TORCHE_PUISSANCE; lights[2].g = TORCHE_PUISSANCE; lights[2].b = TORCHE_PUISSANCE;
+        lights[2].radius = TORCHE_RADIUS;
+    }
+    else lights[2] = (Light){0};
 }
 
 
@@ -1944,7 +1995,7 @@ int main(void)
             gameTimer += dt;
 
         // ----- Animation des lumières -----
-        AnimLights(px, py, dt);
+        AnimLights(px, py, angle, dt);
         // -------------------------------------   
 
         BeepDependsOnExitDistance(beep, (int)px, (int)py);
