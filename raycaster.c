@@ -28,7 +28,7 @@ int renderW, renderH, halfRenderH;
 
 // ------ Parametres de qualite/performance du rendu ------
 #define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
-#define COL_STEP 2
+#define COL_STEP 1
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
@@ -45,7 +45,7 @@ int renderW, renderH, halfRenderH;
 #define PATROL_LIGHTS  (NUM_LIGHTS - 1)
 #define AMBIENT_LIGHT 0.03f
 #define TORCHE_RADIUS 2.8f
-#define TORCHE_PUISSANCE 3.0f
+#define TORCHE_PUISSANCE 1.5f
 
 // Paramètres bloom des sprites light patrols
 #define BLOOM_PASSES  7      // nombre de passes (1 = pas de bloom)
@@ -63,7 +63,8 @@ bool torcheOn = true;
 bool traceOn = false;
 float pitch = 0.0f;
 bool playSoundOneTime = true;
-bool noBeepSound = false;
+bool playBeepSound = true;
+float pulseRadius = 0.0f;
 
 pthread_t threads[NUM_THREADS];
 pthread_barrier_t barrierStart;
@@ -76,6 +77,8 @@ float gameTimer  = 0.0f;   // temps écoulé en secondes
 int   bestTime   = 0;      // meilleur temps en secondes (0 = pas encore de score)
 
 bool lightReachedExit = false;
+
+float distExit   = 0.0f;
 
 // ----- Couleurs des murs selon la face touchée -----
 // Nord/Sud plus sombres pour donner un effet de profondeur
@@ -192,6 +195,7 @@ void AnimLights(float px, float py, float dt);
 void GState(GameState gameState, float* px, float* py, Sound tada, Sound siren);
 void RenderSprites(Context ctx, float px, float py, float angle);
 void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float angle, int horizon);
+void RenderFloorCeil(Context* ctx, float px, float py, float angle, int horizon);
 void* RenderWallsThread(void* arg);
 void initThreads(Context ctx);
 // --------------------------------------------------------------------
@@ -354,6 +358,7 @@ void ResetGame(float *px, float *py)
     gameState = STATE_PLAY;
     traceOn   = false;
     playSoundOneTime = true;
+    playBeepSound    = true;
 
     if (!SolveMaze(*px, *py)) gameState = STATE_MAZE_NOT_READY;
     memset(TRACES, 0, sizeof(TRACES));
@@ -900,12 +905,12 @@ Sound CreateBeep(void) {
 
 void BeepDependsOnExitDistance(Sound beep, int px, int py)
 {
-    if (gameState != STATE_PLAY || noBeepSound)
+    if (gameState != STATE_PLAY)
         return;
 
     // 1. Trouver les coordonnées de la sortie (à faire une fois au GenerateMap)
     // Supposons exitX et exitY stockés globalement
-    float distExit = sqrtf(powf(exitX - px, 2) + powf(exitY - py, 2));
+    distExit = sqrtf(powf(exitX - px, 2) + powf(exitY - py, 2));
 
     // 2. Timer pour le bip
     static float timer = 0.0f;
@@ -919,9 +924,13 @@ void BeepDependsOnExitDistance(Sound beep, int px, int py)
         float pitch = 2.0f - (distExit * 0.05f); 
         if (pitch < 0.5f) pitch = 0.5f;
         
-        SetSoundPitch(beep, pitch);
-        PlaySound(beep);
+        if(playBeepSound){
+            SetSoundPitch(beep, pitch);
+            PlaySound(beep);
+        }
         timer = 0.0f;
+
+        pulseRadius = 20.0f; 
     }
 }
 
@@ -1050,7 +1059,7 @@ void KeysAndJoypadHandler(float* angle, float* px, float* py, float dt)
         afficherMap = !afficherMap;
 
     if (IsKeyPressed(KEY_P))
-        noBeepSound = !noBeepSound;
+        playBeepSound = !playBeepSound;
 
     // --- Contrôle de la Torche ---
     // On utilise le bouton Y (ou triangle) par exemple
@@ -1301,7 +1310,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             float viewFactor = fabsf(sinf(viewRelAngle));
             Color s,n;
 
-            if (viewFactor > 0.12f) {
+            if (viewFactor > 0.01f) {
                 float tangentView;
                 if (hit.side == 0)
                     tangentView = sinf(ray_angle);
@@ -1395,12 +1404,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
     }
 }
 
-void RenderFrame(Context ctx, float px, float py, float angle)
-{
-    memset(ctx.framebuffer, 0, renderW * renderH * sizeof(Color));
-
-    int horizon = halfRenderH + (int)pitch;
-
+void RenderFloorCeil(Context* ctx, float px, float py, float angle, int horizon){
     // Sol/plafond par ligne
     for (int y = 0; y < renderH; y++)
     {
@@ -1454,15 +1458,15 @@ void RenderFrame(Context ctx, float px, float py, float angle)
             int tx, ty;
             Color base;
             if (is_floor) {
-                tx = (int)(fabsf(fmodf(floorX, 1.0f)) * ctx.texFloorW) % ctx.texFloorW;
-                ty = (int)(fabsf(fmodf(floorY, 1.0f)) * ctx.texFloorH) % ctx.texFloorH;
-                base = ctx.floorPixels[ty * ctx.texFloorW + tx];
+                tx = (int)(fabsf(fmodf(floorX, 1.0f)) * ctx->texFloorW) % ctx->texFloorW;
+                ty = (int)(fabsf(fmodf(floorY, 1.0f)) * ctx->texFloorH) % ctx->texFloorH;
+                base = ctx->floorPixels[ty * ctx->texFloorW + tx];
             } else {
-                tx = (int)(fabsf(fmodf(floorX, 1.0f)) * ctx.texCeilW) % ctx.texCeilW;
-                ty = (int)(fabsf(fmodf(floorY, 1.0f)) * ctx.texCeilH) % ctx.texCeilH;
-                base = ctx.ceilPixels[ty * ctx.texCeilW + tx];
+                tx = (int)(fabsf(fmodf(floorX, 1.0f)) * ctx->texCeilW) % ctx->texCeilW;
+                ty = (int)(fabsf(fmodf(floorY, 1.0f)) * ctx->texCeilH) % ctx->texCeilH;
+                base = ctx->ceilPixels[ty * ctx->texCeilW + tx];
             }
-            ctx.framebuffer[y * renderW + x] = (Color){
+            ctx->framebuffer[y * renderW + x] = (Color){
                 (unsigned char)(base.r * fR * fog),
                 (unsigned char)(base.g * fG * fog),
                 (unsigned char)(base.b * fB * fog),
@@ -1470,6 +1474,16 @@ void RenderFrame(Context ctx, float px, float py, float angle)
             };
         }
     }
+}
+
+void RenderFrame(Context ctx, float px, float py, float angle)
+{
+    memset(ctx.framebuffer, 0, renderW * renderH * sizeof(Color));
+
+    int horizon = halfRenderH + (int)pitch;
+
+    // Sol/plafond par ligne
+    RenderFloorCeil(&ctx, px, py, angle, horizon);
 
     // Murs
     // Remplir les données pour chaque thread
@@ -1955,6 +1969,31 @@ int main(void)
         DrawText(timerBuf, SCREEN_W/2 - 30, 10, 24, WHITE);
 
         DrawText("ZQSD / Fleches : se deplacer", 10, SCREEN_H - 25, 14, GRAY);
+
+        // ----- HUD Pulse -----
+        if (pulseRadius > 0.0f)
+        {
+            // Distance normalisée 0→1 pour la couleur
+            //float distExit = sqrtf(powf(exitX - (int)px, 2) + powf(exitY - (int)py, 2));
+            float proximity = 1.0f - fminf(distExit / 20.0f, 1.0f);  // 1 = très proche
+
+            // Couleur : vert loin → rouge proche
+            Color pulseColor = {
+                (unsigned char)(proximity * 255),
+                (unsigned char)((1.0f - proximity) * 255),
+                0,
+                (unsigned char)(pulseRadius / 20.0f * 200)  // fade out
+            };
+
+            int cx = SCREEN_W/2;
+            int cy = 60;
+            DrawCircle(cx, cy, (int)pulseRadius, pulseColor);
+            DrawCircleLines(cx, cy, (int)pulseRadius, WHITE);
+
+            // Décroissance
+            pulseRadius -= 60.0f * GetFrameTime();
+            if (pulseRadius < 0.0f) pulseRadius = 0.0f;
+        }
 
         EndDrawing();
     }
