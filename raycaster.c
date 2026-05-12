@@ -835,31 +835,39 @@ Sound CreateTada(void)
 Sound CreateSiren(void)
 {
     int sampleRate  = 44100;
-    float duration  = 4.5f;
+    float duration  = 4.0f; // Durée exacte demandée
     int sampleCount = (int)(sampleRate * duration);
     float *samples  = malloc(sampleCount * sizeof(float));
 
-    float freqStart = 880.0f;   // La5 — début aigu
-    float freqEnd   = 220.0f;   // La3 — fin grave
+    float freqStart = 880.0f; 
+    float freqEnd   = 110.0f; // Descente plus profonde pour l'effet
+    
+    float phase = 0.0f;
 
     for (int i = 0; i < sampleCount; i++)
     {
-        float t    = (float)i / sampleRate;
-        float prog = (float)i / sampleCount;   // 0.0 → 1.0
+        float prog = (float)i / sampleCount;
 
-        // Pitch qui descend linéairement
-        float freq = freqStart + (freqEnd - freqStart) * prog;
+        // Calcul de la fréquence actuelle (glissando linéaire)
+        float currentFreq = freqStart + (freqEnd - freqStart) * prog;
 
-        // Envelope : fade out sur la fin
+        // Accumulation de la phase pour éviter les craquements et distorsions
+        // Formule : phase += 2 * PI * f / sampleRate
+        phase += (2.0f * PI * currentFreq) / (float)sampleRate;
+        
+        // On garde la phase sous 2*PI pour la précision flottante
+        if (phase > 2.0f * PI) phase -= 2.0f * PI;
+
+        // Enveloppe simple pour éviter le "clic" au début et à la fin
         float env = 1.0f;
-        if (i > sampleCount - 4000)
-            env = (float)(sampleCount - i) / 4000.0f;
+        if (i < 1000) env = (float)i / 1000.0f;
+        if (i > sampleCount - 4000) env = (float)(sampleCount - i) / 4000.0f;
 
-        // Onde carrée adoucie (somme d'harmoniques impaires)
+        // Synthèse additive (Carrée adoucie)
         samples[i] = env * (
-            0.6f * sinf(2.0f * PI * freq       * t) +
-            0.2f * sinf(2.0f * PI * freq * 3.f * t) +
-            0.1f * sinf(2.0f * PI * freq * 5.f * t)
+            0.5f * sinf(phase) +          // Fondamentale
+            0.2f * sinf(phase * 3.0f) +   // Harmonique 3
+            0.1f * sinf(phase * 5.0f)     // Harmonique 5
         );
     }
 
@@ -870,8 +878,9 @@ Sound CreateSiren(void)
         .channels   = 1,
         .data       = samples
     };
+    
     Sound sound = LoadSoundFromWave(wave);
-    free(samples);
+    free(samples); 
     return sound;
 }
 
