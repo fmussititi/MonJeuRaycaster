@@ -27,7 +27,7 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.3 // 1 = natif, 2 = moitié, 4 = quart
+#define RENDER_SCALE 1.4 // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 2
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
@@ -41,6 +41,7 @@ int renderW, renderH, halfRenderH;
 #define MAP_H  29
 
 #define PATROL_LIGHT_SPEED 0.2f
+#define CHASE_RADIUS 6.0f  // distance en cases pour déclencher la poursuite
 #define NUM_LIGHTS  3
 #define PATROL_LIGHTS  (NUM_LIGHTS - 1)
 #define AMBIENT_LIGHT 0.03f
@@ -70,7 +71,7 @@ pthread_t threads[NUM_THREADS];
 pthread_barrier_t barrierStart;
 pthread_barrier_t barrierEnd;
 
-typedef enum { STATE_PLAY, STATE_WIN, STATE_LOST, STATE_MAZE_NOT_READY } GameState;
+typedef enum { STATE_PLAY, STATE_WIN, STATE_LOST, STATE_LOST_BY_CHASING, STATE_MAZE_NOT_READY } GameState;
 GameState gameState = STATE_PLAY;
 
 float gameTimer  = 0.0f;   // temps écoulé en secondes
@@ -110,6 +111,7 @@ typedef struct {
     Light* l;
     float dx, dy;     // Direction actuelle
     int lastGridX, lastGridY; // Pour détecter le changement de case
+    bool chasing;
 } MouvingLight;
 
 Light lights[] = {
@@ -150,6 +152,7 @@ typedef struct {
 } Sprite;
 
 Sprite sprites[PATROL_LIGHTS];    // une par lumière patrouille
+Light tmpLightColor[NUM_LIGHTS] = {0};
 
 typedef struct
 {
@@ -431,6 +434,15 @@ void ResetGame(float *px, float *py)
     traceOn   = false;
     playSoundOneTime = true;
     playBeepSound    = true;
+
+    for (int i=0; i<PATROL_LIGHTS; i++)
+    {
+        patrolLights[i].chasing = false;
+
+        tmpLightColor[i].r = patrolLights[i].l->r;
+        tmpLightColor[i].g = patrolLights[i].l->g;
+        tmpLightColor[i].b = patrolLights[i].l->b;
+    }
 
     if (!SolveMaze(*px, *py)) gameState = STATE_MAZE_NOT_READY;
     memset(TRACES, 0, sizeof(TRACES));
@@ -1070,7 +1082,8 @@ void apply_fxaa(Color *fb, Color *tmp, int w, int h)
 
 void KeysAndJoypadHandler(float* angle, float* px, float* py, float dt)
 {
-    if (gameState == STATE_WIN || gameState == STATE_LOST || gameState == STATE_MAZE_NOT_READY) return;
+    if (gameState == STATE_WIN || gameState == STATE_LOST|| gameState == STATE_LOST_BY_CHASING
+         || gameState == STATE_MAZE_NOT_READY) return;
 
     // ----- Déplacements -----
     float dx = cosf(*angle) * MOVE_SPEED * dt;
@@ -1291,7 +1304,10 @@ void draw_minimap(float px, float py, float angle)
     for (int i = 0; i < PATROL_LIGHTS; i++) {
         int lpx = OX + (int)(patrolLights[i].l->x * TILE);
         int lpy = OY + (int)(patrolLights[i].l->y * TILE);
-        Color lc = (i == 0) ? (Color){255, 200, 50, 255} : (Color){50, 150, 255, 255};
+        //Color lc = (i == 0) ? (Color){255, 200, 50, 255} : (Color){50, 150, 255, 255};
+        Color lc = (Color){(int)(fminf(patrolLights[i].l->r, 1.0f) * 255.0), 
+                           (int)(fminf(patrolLights[i].l->g, 1.0f) * 255.0), 
+                           (int)(fminf(patrolLights[i].l->b, 1.0f) * 255.0), 255};
         DrawCircle(lpx, lpy, 4, lc);
 
         // Direction de la lumière
@@ -1674,9 +1690,18 @@ void RenderSprites(Context ctx, float px, float py, float angle)
         if (drawStartX < 0)        drawStartX = 0;
         if (drawEndX >= renderW)   drawEndX   = renderW - 1;
 
-        Color tint = (sprites[s].lightIdx == 0)
-            ? (Color){255, 200,  50, 255}
-            : (Color){ 50, 150, 255, 255};
+        Color tint;
+        if (patrolLights[s].chasing)
+            tint = (Color){255, 0, 0, 255};
+        else
+        /*
+            tint = (sprites[s].lightIdx == 0)
+                ? (Color){255, 200,  50, 255}
+                : (Color){ 50, 150, 255, 255};
+        */
+            tint = (Color){(int)(fminf(patrolLights[s].l->r, 1.0f) * 255.0), 
+                           (int)(fminf(patrolLights[s].l->g, 1.0f) * 255.0), 
+                           (int)(fminf(patrolLights[s].l->b, 1.0f) * 255.0), 255};
 
         for (int pass = 0; pass <= BLOOM_PASSES; pass++)
         {
@@ -1749,8 +1774,33 @@ void RenderSprites(Context ctx, float px, float py, float angle)
 void AnimLights(float px, float py, float angle, float dt) {
     for (int i = 0; i < PATROL_LIGHTS; i++) {
 
-        float nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * PATROL_LIGHT_SPEED;
-        float nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * PATROL_LIGHT_SPEED;
+        float dxp = patrolLights[i].l->x - px;
+        float dyp = patrolLights[i].l->y - py;
+        float distPlayer = sqrtf(dxp*dxp + dyp*dyp);
+
+        // Bascule entre poursuite et patrouille
+        if (distPlayer < CHASE_RADIUS && torcheOn)
+            patrolLights[i].chasing = true;
+        else if (distPlayer > CHASE_RADIUS + 2.0f || !torcheOn)  // hysteresis pour éviter le flicker
+            patrolLights[i].chasing = false;
+
+        float speed = patrolLights[i].chasing ? PATROL_LIGHT_SPEED * 2.0f : PATROL_LIGHT_SPEED;
+
+        if (patrolLights[i].chasing){
+            patrolLights[i].l->r = 1.0f; patrolLights[i].l->g = 0.1f; patrolLights[i].l->b = 0.1f;  // rouge
+        }
+        else {
+            patrolLights[i].l->r = tmpLightColor[i].r; 
+            patrolLights[i].l->g = tmpLightColor[i].g; 
+            patrolLights[i].l->b = tmpLightColor[i].b;
+        }
+
+        // Cible BFS selon le mode
+        int targetX = patrolLights[i].chasing ? (int)px : exitX;
+        int targetY = patrolLights[i].chasing ? (int)py : exitY;
+
+        float nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * speed;
+        float nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * speed;
 
         int gx = (int)nextX;
         int gy = (int)nextY;
@@ -1766,7 +1816,7 @@ void AnimLights(float px, float py, float angle, float dt) {
             patrolLights[i].l->x = cx + 0.5f;
             patrolLights[i].l->y = cy + 0.5f;
 
-            Vec2 dir = GetNextDirToward(cx, cy, exitX, exitY);
+            Vec2 dir = GetNextDirToward(cx, cy, targetX, targetY);
             if (dir.x != 0 || dir.y != 0) {
                 patrolLights[i].dx = dir.x;
                 patrolLights[i].dy = dir.y;
@@ -1776,8 +1826,8 @@ void AnimLights(float px, float py, float angle, float dt) {
             }
 
             // Recalcul depuis la position snappée
-            nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * PATROL_LIGHT_SPEED;
-            nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * PATROL_LIGHT_SPEED;
+            nextX = patrolLights[i].l->x + patrolLights[i].dx * dt * speed;
+            nextY = patrolLights[i].l->y + patrolLights[i].dy * dt * speed;
             gx = (int)nextX;
             gy = (int)nextY;
 
@@ -1796,7 +1846,7 @@ void AnimLights(float px, float py, float angle, float dt) {
             if (gx == exitX && gy == exitY)
                 gameState = STATE_LOST;
 
-            Vec2 dir = GetNextDirToward(gx, gy, exitX, exitY);
+            Vec2 dir = GetNextDirToward(gx, gy, targetX, targetY);
             if (dir.x != 0 || dir.y != 0) {
                 patrolLights[i].dx = dir.x;
                 patrolLights[i].dy = dir.y;
@@ -1818,6 +1868,14 @@ void AnimLights(float px, float py, float angle, float dt) {
 
         patrolLights[i].l->x = nextX;
         patrolLights[i].l->y = nextY;
+
+        if (patrolLights[i].chasing){
+            // Détection collision avec le joueur par distance
+            float cdx = patrolLights[i].l->x - px;
+            float cdy = patrolLights[i].l->y - py;
+            if (cdx*cdx + cdy*cdy < 0.5f * 0.5f)
+                gameState = STATE_LOST_BY_CHASING;
+        }
     }
 
     float offset = 1.0f;
@@ -1874,6 +1932,27 @@ void GState(GameState gameState, float* px, float* py, Sound tada, Sound siren){
 
             DrawText("UNE LUMIÈRE A TROUVÉ LA SORTIE !",  SCREEN_W/2 - 220, SCREEN_H/2 - 50, 30, RED);
             DrawText("Appuyez sur R pour rejouer", SCREEN_W/2 - 150, SCREEN_H/2 + 10, 20, WHITE);
+
+            if (IsKeyPressed(KEY_R) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_RIGHT))
+            {
+                ResetGame(px, py);
+            }
+            break;
+
+            case STATE_LOST_BY_CHASING:
+
+            if (!IsSoundPlaying(siren) && playSoundOneTime) { PlaySound(siren); playSoundOneTime= !playSoundOneTime; };
+
+            DrawText("UNE LUMIÈRE VOUS A MANGE !",  SCREEN_W/2 - 220, SCREEN_H/2 - 50, 30, RED);
+            DrawText("Appuyez sur R pour rejouer", SCREEN_W/2 - 150, SCREEN_H/2 + 10, 20, WHITE);
+
+            for (int i=0; i<PATROL_LIGHTS; i++){
+                patrolLights[i].chasing = false;
+            
+                patrolLights[i].l->r = tmpLightColor[i].r;
+                patrolLights[i].l->g = tmpLightColor[i].g;
+                patrolLights[i].l->b = tmpLightColor[i].b;
+            }
 
             if (IsKeyPressed(KEY_R) || IsGamepadButtonPressed(0, GAMEPAD_BUTTON_MIDDLE_RIGHT))
             {
