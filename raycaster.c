@@ -27,7 +27,7 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.4 // 1 = natif, 2 = moitié, 4 = quart
+#define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 2
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
@@ -45,7 +45,7 @@ int renderW, renderH, halfRenderH;
 #define NUM_LIGHTS  3
 #define PATROL_LIGHTS  (NUM_LIGHTS - 1)
 #define AMBIENT_LIGHT 0.03f
-#define TORCHE_RADIUS 1.8f
+#define TORCHE_RADIUS 2.8f
 #define TORCHE_PUISSANCE 1.5f
 
 // Paramètres bloom des sprites light patrols
@@ -66,6 +66,7 @@ float pitch = 0.0f;
 bool playSoundOneTime = true;
 bool playBeepSound = true;
 float pulseRadius = 0.0f;
+float parallaxScale = 0.25f;
 
 pthread_t threads[NUM_THREADS];
 pthread_barrier_t barrierStart;
@@ -99,6 +100,8 @@ typedef struct {
     float   texX;
     float   nx, ny;     // normal
     int     wallType;
+    float   wx, wy;     // position exacte du point d'impact en world space
+    int     mapX, mapY; // case de la grille touchée
 } RayHit;
 
 typedef struct {
@@ -761,6 +764,25 @@ RayHit cast_ray_dda(float px, float py, float angle)
 
     hit.texX  = fmodf(hitX * TEX_TILE, 1.0f);
 
+    hit.mapX = mx;
+    hit.mapY = my;
+
+    // Normale
+    if (side == 0) { hit.nx = (float)-step_x; hit.ny = 0.0f; }
+    else           { hit.nx = 0.0f;           hit.ny = (float)-step_y; }
+
+    // Position exacte du point d'impact
+    if (hit.side == 0)
+    {
+        hit.wx = (float)mx + (step_x < 0 ? 1.0f : 0.0f);
+        hit.wy = py + perp_dist * rdy;
+    }
+    else
+    {
+        hit.wx = px + perp_dist * rdx;
+        hit.wy = (float)my + (step_y < 0 ? 1.0f : 0.0f);
+    }
+
     return hit;
 }
 
@@ -1211,6 +1233,12 @@ void KeysAndJoypadHandler(float* angle, float* px, float* py, float dt)
         //memset(TRACES, 0, sizeof(TRACES));
         traceOn = !traceOn;
     }
+
+    if (IsKeyDown(KEY_KP_ADD)) parallaxScale += 0.01f;
+    if (IsKeyDown(KEY_KP_SUBTRACT)) parallaxScale -= 0.01f;
+
+    if (parallaxScale < 0.0f) parallaxScale = 0.0f;
+    if (parallaxScale > 0.5f) parallaxScale = 0.5f;
 }
 
 
@@ -1380,16 +1408,59 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
         }
 
         // ── Pré-calcul parallax (dépend de col uniquement) ──────────────
-        float viewRelAngle = ray_angle - angle;
-        float viewFactor   = fminf(fabsf(tanf(viewRelAngle)), 8.0f);
-        //int   numLayers    = 8 + (int)(viewFactor * viewFactor * 24);
-        int   numLayers    = 30 + (int)(viewFactor * 120);
-        float parallaxScale = 0.25f;
+        // Vecteur caméra → point d'impact
+        float vViewWS_x = hit.wx - px;
+        float vViewWS_z = hit.wy - py;  // y dans le raycaster = z en 3D
+
+        // Tangente depuis la normale stockée dans hit
+        float tangentX = -hit.ny;
+        float tangentZ =  hit.nx;
+
+        // Projection → tangent space
+        float vViewTS_x = vViewWS_x * tangentX + vViewWS_z * tangentZ;
+        float vViewTS_z = vViewWS_x * hit.nx   + vViewWS_z * hit.ny;
+
+        float len_xy    = fabsf(vViewTS_x);  // vViewTS_y = 0 pour murs verticaux
+        float fLength   = sqrtf(vViewTS_x*vViewTS_x + vViewTS_z*vViewTS_z);
+        float fParallaxLength = (fabsf(vViewTS_z) > 0.01f) 
+                                ? sqrtf(fLength*fLength - vViewTS_z*vViewTS_z) / vViewTS_z 
+                                : 0.0f;
+
+        // Direction normalisée (±1 sur X pour murs verticaux)
+        float dirX = (len_xy > 0.001f) ? vViewTS_x / len_xy : 0.0f;
+
+        float vParallaxOffsetX = dirX * fParallaxLength * parallaxScale;
+        vParallaxOffsetX = fmaxf(-8.0f, fminf(8.0f, vParallaxOffsetX));
+
+        int numLayers = 10 + (int)(fabsf(vParallaxOffsetX) * 64.0f);
+        numLayers = fminf(numLayers, 150);
+
+        numLayers = 64;
+
+        //float parallaxScale = 0.25f;
         float layerDepth   = 1.0f / numLayers;
 
-        float tangentView  = (hit.side == 0) ? sinf(ray_angle) : cosf(ray_angle);
-        //float deltaTexX = tangentView * parallaxScale * viewFactor / (fmaxf(hit.dist, 0.5f) * numLayers);
-        float deltaTexX = tangentView * parallaxScale * viewFactor / numLayers;
+
+        // Debug temporaire — colorie les murs selon leur cas
+        Color debugColor = WHITE;
+        if (hit.side == 0 && hit.nx < 0) debugColor = RED;    // cas 1
+        if (hit.side == 0 && hit.nx > 0) debugColor = GREEN;  // cas 2
+        if (hit.side == 1 && hit.ny < 0) debugColor = BLUE;   // cas 3
+        if (hit.side == 1 && hit.ny > 0) debugColor = YELLOW; // cas 4
+
+        float faceSign = 1.0f;
+        if (hit.side == 0 && hit.nx < 0) faceSign =  1.0f;
+        if (hit.side == 0 && hit.nx > 0) faceSign = -1.0f;
+        if (hit.side == 1 && hit.ny < 0) faceSign = -1.0f;  // inversé
+        if (hit.side == 1 && hit.ny > 0) faceSign =  1.0f;  // inversé
+
+
+        typedef struct { float x; float y; } Vec2;
+        
+        Vec2 deltaTex = {
+            faceSign * (vViewTS_x > 0 ? 1.0f : -1.0f) * fabsf(vParallaxOffsetX) / numLayers,
+            0.0f
+        };
 
         // ── Boucle pixel ────────────────────────────────────────────────
         for (int y = draw_top; y < draw_bot; y++)
@@ -1402,10 +1473,10 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             // ── Steep Parallax Occlusion Mapping ────────────────────────
             float currentTexX     = hit.texX;
             float currentHeight   = 1.0f;
-            float currentLayerDepth = 0.0f;
+            float currentLayerDepth = 1.0f;
             float prevTexX        = currentTexX;
             float prevHeight      = 1.0f;
-            float prevLayerDepth  = 0.0f;
+            float prevLayerDepth  = 1.0f;
 
             for (int i = 0; i < numLayers; i++)
             {
@@ -1413,46 +1484,39 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
                 prevHeight      = currentHeight;
                 prevLayerDepth  = currentLayerDepth;
 
-                currentTexX       -= deltaTexX;
-                currentTexX       -= floorf(currentTexX);
+                currentTexX       -= deltaTex.x;
 
-                int sampleX = (int)(currentTexX * ctx->texW);
-                if (sampleX < 0)            sampleX = 0;
-                if (sampleX >= ctx->texW)   sampleX = ctx->texW - 1;
+                float wrappedX = currentTexX - floorf(currentTexX);
+                int sampleX = (int)(wrappedX * ctx->texW);
+                sampleX = fmaxf(0, fminf(ctx->texW - 1, sampleX));
 
                 currentHeight      = ctx->wallHeight[texY * ctx->texW + sampleX].r / 255.0f;
-                //float wrappedX = currentTexX - floorf(currentTexX);
-                //currentHeight = SampleBilinear(ctx->wallHeight, ctx->heightW, ctx->heightH, wrappedX, texPos).r / 255.0f;
-                currentLayerDepth += layerDepth;
+                currentLayerDepth -= layerDepth;
 
-                if (currentLayerDepth >= currentHeight) break;
+                if (currentHeight >= currentLayerDepth) break;
             }
 
             // ── Interpolation POM ────────────────────────────────────────
             float afterDepth  = currentHeight - currentLayerDepth;  // ≤ 0
             float beforeDepth = prevHeight    - prevLayerDepth;      // ≥ 0
-            float denom  = beforeDepth - afterDepth;
-            float weight = (fabsf(denom) > 0.0001f) ? beforeDepth / denom : 0.0f;
+            float denom  = afterDepth - beforeDepth;
+            float weight = (fabsf(denom) > 0.0001f) ? afterDepth / denom : 0.0f;
             weight = fmaxf(0.0f, fminf(1.0f, weight));
 
+            // Interpolation X
             float finalTexXf = prevTexX * weight + currentTexX * (1.0f - weight);
             finalTexXf -= floorf(finalTexXf);
 
-            int finalTexX =
-                (int)(finalTexXf * ctx->texW);
+            int finalTexX = (int)(finalTexXf * ctx->texW);
 
-            // clamp sécurité
-            if (finalTexX < 0)
-                finalTexX = 0;
-
-            if (finalTexX >= ctx->texW)
-                finalTexX = ctx->texW - 1;
+            finalTexX = fmaxf(0, fminf(ctx->texW - 1, finalTexX));
 
             // ── Échantillonnage bilinéaire ───────────────────────────────
             Color s = SampleBilinear(ctx->wallPixels, ctx->texW,  ctx->texH,  finalTexXf, texPos);
             Color n = SampleBilinear(ctx->wallNormal, ctx->normW, ctx->normH, finalTexXf, texPos);
-            //Color s = ctx->wallPixels[texY * ctx->texW + finalTexX];
-            //Color n = ctx->wallNormal[texY * ctx->normW + finalTexX];
+
+            //Color s = ctx->wallPixels[texY  * ctx->texW + finalTexX];
+            //Color n = ctx->wallNormal[texY  * ctx->normW + finalTexX];
 
             // ── Normal mapping ───────────────────────────────────────────
             float nnx = (n.r / 255.0f) * 2.0f - 1.0f;
@@ -2016,6 +2080,7 @@ int main(void)
     ImageFormat(&imgHeight, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
     int heightW = imgHeight.width;
     int heightH = imgHeight.height;
+    //ImageColorInvert(&imgHeight);
     Color *wallHeight = LoadImageColors(imgHeight);
     UnloadImage(imgHeight);
 
