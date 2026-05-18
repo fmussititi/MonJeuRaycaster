@@ -27,7 +27,7 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 2.0 // 1 = natif, 2 = moitié, 4 = quart
+#define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 1
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
@@ -45,7 +45,7 @@ int renderW, renderH, halfRenderH;
 #define NUM_LIGHTS  3
 #define PATROL_LIGHTS  (NUM_LIGHTS - 1)
 #define AMBIENT_LIGHT 0.03f
-#define TORCHE_RADIUS 2.8f
+#define TORCHE_RADIUS 1.8f
 #define TORCHE_PUISSANCE 1.5f
 
 // Paramètres bloom des sprites light patrols
@@ -1470,7 +1470,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
         float vParallaxOffsetX = dirX * fParallaxLength * parallaxScale;
         vParallaxOffsetX = fmaxf(-8.0f, fminf(8.0f, vParallaxOffsetX));
 
-        int numLayers = 100 + (int)(fabsf(vParallaxOffsetX) * 250.0f);
+        int numLayers = 10 + (int)(fabsf(vParallaxOffsetX) * 250.0f);
         numLayers = fminf(numLayers, 250);
 
         //float parallaxScale = 0.25f;
@@ -1565,25 +1565,35 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
                 if (!lc[i].active) continue;
 
                 // ── Shadow ray ──────────────────────────────────────────
-                float shadow      = 1.0f;
-                float lightDirX   = (hit.side == 0) ? lc[i].ldx : lc[i].ldy;
-                float shadowTexX  = finalTexXf;
-                float shadowHeight = currentHeight;  // hauteur au point de percée POM
+                // Projection lumière en tangent space
+                float lViewTS_x = lc[i].ldx * tangentX + lc[i].ldy * tangentZ;
+                float shadowStep     = lViewTS_x * 0.01f;
+                float shadowTexX     = finalTexXf;
+                float shadowHeight   = currentHeight;
+                float shadow         = 1.0f;
+                int   numShadowSteps = 16;
+                float heightStep     = (1.0f - currentHeight) / numShadowSteps;
 
-                for (int sstep = 0; sstep < 8; sstep++)
+                for (int sstep = 0; sstep < numShadowSteps; sstep++)
                 {
-                    shadowTexX += lightDirX * 0.008f;
-                    shadowTexX -= floorf(shadowTexX);
+                    shadowTexX   += shadowStep;
+                    shadowHeight += heightStep;
 
-                    int sx = (int)(shadowTexX * ctx->texW);
-                    if (sx < 0)           sx = 0;
-                    if (sx >= ctx->texW)  sx = ctx->texW - 1;
+                    if (shadowHeight >= 1.0f) break;  // sorti de la surface
 
-                    //float sampleHeight = ctx->wallHeight[texY * ctx->texW + sx].r / 255.0f;
-                    float sampleHeight = SampleBilinear(ctx->wallHeight, ctx->heightW, ctx->heightH, shadowTexX, texPos).r / 255.0f;
-                    if (sampleHeight > shadowHeight + 0.02f) { shadow = 0.5f; break; }
-                    shadowHeight += 0.015f;
+                    float wrappedSX = shadowTexX - floorf(shadowTexX);
+                    float sampleH   = SampleBilinear(ctx->wallHeight, ctx->heightW, 
+                                                    ctx->heightH, wrappedSX, texPos).r / 255.0f;
+
+                    if (sampleH > shadowHeight)
+                    {
+                        float t = 1.0f - (float)sstep / numShadowSteps;
+                        shadow = 1.0f - t * 0.65f;
+                        break;
+                    }
                 }
+                // ─────────────────────────────────────────────────────
+
 
                 float diff = fmaxf(0.0f, nnx*lc[i].ldx + nny*lc[i].ldy + nnz*lc[i].ldz);
                 outR += diff * shadow * lc[i].atten * lc[i].r;
@@ -1981,7 +1991,7 @@ void AnimLights(float px, float py, float angle, float dt) {
         }
     }
 
-    float offset = 1.0f;
+    float offset = 0.5f;
     if (torcheOn){
         lights[2].x = px + cosf(angle) * offset;
         lights[2].y = py + sinf(angle) * offset;
@@ -2101,8 +2111,8 @@ int main(void)
     // Calcul de la résolution de rendu
     renderW = SCREEN_W / RENDER_SCALE;
     renderH = SCREEN_H / RENDER_SCALE;
-    //renderW = 1920;
-    //renderH = 1080;
+    //renderW = 1280;
+    //renderH = 720;
     halfRenderH = renderH / 2;
 
     Image imgWall = LoadImage("Wall2.png");
