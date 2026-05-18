@@ -27,14 +27,14 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
+#define RENDER_SCALE 3.5 // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 1
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.0001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
 #define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
-#define SHADOW_STEPS 16
-#define PARALLAX_STEPS 42.0f
+#define SHADOW_STEPS 100
+#define PARALLAX_STEPS 100
 #define PARALLAX_SCALE 0.1f
 #define NUM_THREADS 8
 
@@ -50,6 +50,7 @@ int renderW, renderH, halfRenderH;
 #define AMBIENT_LIGHT 0.03f
 #define TORCHE_RADIUS 1.8f
 #define TORCHE_PUISSANCE 1.5f
+#define TORCHE_DISTANCE 0.5f
 
 // Paramètres bloom des sprites light patrols
 #define BLOOM_PASSES  7      // nombre de passes (1 = pas de bloom)
@@ -217,6 +218,7 @@ static inline float SampleHeight(Color* tex, int texW, int texH, float u, float 
 void InitLUT(void);
 static inline float LUTsin(float angle);
 static inline float LUTcos(float angle);
+float FastInvSqrt(float x);
 // --------------------------------------------------------------------
 
 #pragma region UTILES
@@ -289,6 +291,18 @@ static inline Color SampleBilinear(Color* tex, int texW, int texH, float u, floa
     out.b = (unsigned char)(((c00.b*ifxi + c10.b*ifx)*ifyi + (c01.b*ifxi + c11.b*ifx)*ify) >> 16);
     out.a = 255;
     return out;
+}
+
+float FastInvSqrt(float x) {
+    float xhalf = 0.5f * x;
+    int i;
+    // Utilisation de memcpy pour éviter les violations de typage strict (strict-aliasing)
+    memcpy(&i, &x, sizeof(i));
+    i = 0x5f3759df - (i >> 1); // Le fameux nombre magique
+    memcpy(&x, &i, sizeof(x));
+    x = x * (1.5f - xhalf * x * x); // 1ère itération de Newton (suffisante pour de la 3D)
+    // x = x * (1.5f - xhalf * x * x); // Active cette 2e itération si tu as besoin de plus de précision
+    return x;
 }
 
 void InitLUT(void)
@@ -1469,26 +1483,32 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
         int draw_bot    = wall_bot > renderH ? renderH : wall_bot;
 
         // Point d'impact sur le mur (pour l'éclairage)
-        float wx = px + cosf(ray_angle) * hit.dist;
-        float wy = py + sinf(ray_angle) * hit.dist;
+        //float wx = px + cosf(ray_angle) * hit.dist;
+        //float wy = py + sinf(ray_angle) * hit.dist;
 
         // ── Pré-calcul lumières (dépend de col uniquement) ──────────────
         typedef struct { float ldx, ldy, ldz, atten, r, g, b; int active; } LightContrib;
         LightContrib lc[8];
         for (int i = 0; i < numLights; i++) {
             lc[i].active = 0;
-            float ldx   = lights[i].x - wx;
-            float ldy   = lights[i].y - wy;
+            float ldx   = lights[i].x - hit.wx;
+            float ldy   = lights[i].y - hit.wy;
             float dist2 = ldx*ldx + ldy*ldy;
             if (dist2 > lights[i].radius * lights[i].radius) continue;
 
-            float dist = sqrtf(dist2);
-            float ldz  = 0.5f;
-            float lenL = sqrtf(dist2 + ldz*ldz);
+            //float dist = sqrtf(dist2);
+            //float ldz  = 0.5f;
+            //float lenL = sqrtf(dist2 + ldz*ldz);
 
-            lc[i].ldx = ldx / lenL;
-            lc[i].ldy = ldy / lenL;
-            lc[i].ldz = ldz / lenL;
+            //lc[i].ldx = ldx / lenL;
+            //lc[i].ldy = ldy / lenL;
+            //lc[i].ldz = ldz / lenL;
+            float dist = dist2 * FastInvSqrt(dist2);
+            float invLenL = FastInvSqrt(dist2 + 0.25f); // 0.5f * 0.5f = 0.25f
+
+            lc[i].ldx = ldx * invLenL;
+            lc[i].ldy = ldy * invLenL;
+            lc[i].ldz = 0.5f * invLenL;
             lc[i].r   = lights[i].r;
             lc[i].g   = lights[i].g;
             lc[i].b   = lights[i].b;
@@ -1563,19 +1583,20 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             float screenY = ((float)y - (wall_top + wall_h_real*0.5f)) / (wall_h_real*0.5f);
 
             // vue pixel -> espace caméra
-            float viewX = cosf(ray_angle);
+            float viewX = LUTcos(ray_angle);
             float viewY = screenY;
-            float viewZ = sinf(ray_angle);
+            float viewZ = LUTsin(ray_angle);
 
-            float len = sqrtf(
-                viewX*viewX +
-                viewY*viewY +
-                viewZ*viewZ
-            );
+            //float len = sqrtf( viewX*viewX + viewY*viewY + viewZ*viewZ );
+            //viewX /= len;
+            //viewY /= len;
+            //viewZ /= len;
+            float dot = viewX*viewX + viewY*viewY + viewZ*viewZ;
+            float invLen = FastInvSqrt(dot);
 
-            viewX /= len;
-            viewY /= len;
-            viewZ /= len;
+            viewX *= invLen;
+            viewY *= invLen;
+            viewZ *= invLen;
 
             // Tangente depuis la normale stockée dans hit
             float tangentX = -hit.ny;
@@ -2171,7 +2192,7 @@ void AnimLights(float px, float py, float angle, float dt) {
         }
     }
 
-    float offset = 0.5f;
+    float offset = TORCHE_DISTANCE;
     if (torcheOn){
         lights[2].x = px + cosf(angle) * offset;
         lights[2].y = py + sinf(angle) * offset;
