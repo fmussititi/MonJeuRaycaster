@@ -27,7 +27,7 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 2.0 // 1 = natif, 2 = moitié, 4 = quart
+#define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 1
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.0001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
@@ -56,9 +56,14 @@ int renderW, renderH, halfRenderH;
 #define BLOOM_SPREAD  2      // écartement en pixels
 #define BLOOM_ALPHA   0.3f   // intensité du halo
 
+#define LUT_SIZE 4096
+static float sinLUT[LUT_SIZE];
+static float cosLUT[LUT_SIZE];
+
 static int MAP[MAP_H][MAP_W];
 // 0.0 = pas de trace, 1.0 = trace toute fraîche
 static float TRACES[MAP_H][MAP_W] = {0};
+
 int exitX, exitY;
 bool afficherMap = false;
 bool deadendBranchOn = true;
@@ -209,6 +214,9 @@ void* RenderWallsThread(void* arg);
 void initThreads(Context ctx);
 static inline Color SampleBilinear(Color* tex, int texW, int texH,  float u, float v);
 static inline float SampleHeight(Color* tex, int texW, int texH, float u, float v);
+void InitLUT(void);
+static inline float LUTsin(float angle);
+static inline float LUTcos(float angle);
 // --------------------------------------------------------------------
 
 #pragma region UTILES
@@ -281,6 +289,33 @@ static inline Color SampleBilinear(Color* tex, int texW, int texH, float u, floa
     out.b = (unsigned char)(((c00.b*ifxi + c10.b*ifx)*ifyi + (c01.b*ifxi + c11.b*ifx)*ify) >> 16);
     out.a = 255;
     return out;
+}
+
+void InitLUT(void)
+{
+    for (int i = 0; i < LUT_SIZE; i++)
+    {
+        float angle = (float)i * (2.0f * PI / LUT_SIZE);
+        sinLUT[i] = sinf(angle);
+        cosLUT[i] = cosf(angle);
+    }
+}
+
+static inline float LUTsin(float angle)
+{
+    // Normalise l'angle dans [0, 2PI]
+    angle = fmodf(angle, 2.0f * PI);
+    if (angle < 0) angle += 2.0f * PI;
+    int idx = (int)(angle * LUT_SIZE / (2.0f * PI)) & (LUT_SIZE - 1);
+    return sinLUT[idx];
+}
+
+static inline float LUTcos(float angle)
+{
+    angle = fmodf(angle, 2.0f * PI);
+    if (angle < 0) angle += 2.0f * PI;
+    int idx = (int)(angle * LUT_SIZE / (2.0f * PI)) & (LUT_SIZE - 1);
+    return cosLUT[idx];
 }
 
 
@@ -840,8 +875,8 @@ RayHit cast_ray_dda(float px, float py, float angle, float player_angle)
     //
     // angle → (cosf(angle), sinf(angle))  longueur toujours = 1
     // point → normalise(target - origin)  longueur ramenée à 1
-    float rdx = cosf(angle);
-    float rdy = sinf(angle);
+    float rdx = LUTcos(angle);
+    float rdy = LUTsin(angle);
 
     // Position du player dans la map
     int mx = (int)px;
@@ -897,7 +932,7 @@ RayHit cast_ray_dda(float px, float py, float angle, float player_angle)
     hitX -= floorf(hitX);
 
     RayHit hit;
-    hit.dist  = perp_dist * cosf(angle - player_angle);
+    hit.dist  = perp_dist * LUTcos(angle - player_angle);
     hit.side  = side;
     hit.color = (side == 0) ? WALL_COLOR_NS : WALL_COLOR_EW;
     hit.wallType = MAP[my][mx];
@@ -915,7 +950,7 @@ RayHit cast_ray_dda(float px, float py, float angle, float player_angle)
 
     hit.texX  = fmodf(hitX * TEX_TILE, 1.0f);
 
-    float euc = hit.dist / cosf(angle - player_angle);
+    float euc = hit.dist / LUTcos(angle - player_angle);
 
     hit.mapX = mx;
     hit.mapY = my;
@@ -952,8 +987,8 @@ RayHit cast_ray_dda(float px, float py, float angle, float player_angle)
 RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_angle)
 {
     // Direction du rayon
-    float rdx = cosf(ray_angle);
-    float rdy = sinf(ray_angle);
+    float rdx = LUTcos(ray_angle);
+    float rdy = LUTsin(ray_angle);
 
     // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
     const float STEP_SIZE = RAY_MARCHING_STEP_SIZE; 
@@ -993,7 +1028,7 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
     // Note : il faudra passer l'angle du joueur en paramètre pour être parfait
     
     RayHit hit;
-    hit.dist  = distance * cosf(ray_angle - player_angle); 
+    hit.dist  = distance * LUTcos(ray_angle - player_angle); 
     hit.wallType = MAP[my][mx];    
 
     if (TRACES[prev_y][prev_x] == 1.0f) hit.wallType = 3;
@@ -1779,8 +1814,8 @@ void RenderFloorCeil(Context* ctx, float px, float py, float angle, int horizon)
         float fog = 1.0f - fminf(row_dist / 12.0f, 1.0f);
 
         // Position centrale de la ligne (pour calculer l'éclairage de la ligne)
-        float floor_cx = px + cosf(angle) * row_dist;
-        float floor_cy = py + sinf(angle) * row_dist;
+        float floor_cx = px + LUTcos(angle) * row_dist;
+        float floor_cy = py + LUTsin(angle) * row_dist;
 
         float fR = AMBIENT_LIGHT, fG = AMBIENT_LIGHT, fB = AMBIENT_LIGHT;
 
@@ -1814,10 +1849,10 @@ void RenderFloorCeil(Context* ctx, float px, float py, float angle, int horizon)
 
         float rayL = angle - FOV / 2.0f;
         float rayR = angle + FOV / 2.0f;
-        float floorStepX = (cosf(rayR) - cosf(rayL)) * row_dist / renderW;
-        float floorStepY = (sinf(rayR) - sinf(rayL)) * row_dist / renderW;
-        float floorX = px + cosf(rayL) * row_dist;
-        float floorY = py + sinf(rayL) * row_dist;
+        float floorStepX = (LUTcos(rayR) - LUTcos(rayL)) * row_dist / renderW;
+        float floorStepY = (LUTsin(rayR) - LUTsin(rayL)) * row_dist / renderW;
+        float floorX = px + LUTcos(rayL) * row_dist;
+        float floorY = py + LUTsin(rayL) * row_dist;
 
         for (int x = 0; x < renderW; x++, floorX += floorStepX, floorY += floorStepY)
         {
@@ -2244,6 +2279,8 @@ void GState(GameState gameState, float* px, float* py, Sound tada, Sound siren){
 
 int main(void)
 {
+    InitLUT();
+
     SCREEN_W = 1920;
     SCREEN_H = 1080;
     HALF_H   = SCREEN_H / 2;
