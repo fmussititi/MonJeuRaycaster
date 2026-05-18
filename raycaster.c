@@ -32,7 +32,7 @@ int renderW, renderH, halfRenderH;
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.0001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
-#define DDA_OR_RAYMARCHING 0 // 0 --> RayMarching; 1 --> DDA
+#define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
 #define SHADOW_STEPS 16
 #define PARALLAX_STEPS 42.0f
 #define PARALLAX_SCALE 0.1f
@@ -185,7 +185,7 @@ void GenerateMapDFS(void);
 bool SolveMaze(int startX, int startY);
 void GenerateMapRandomWalk(void);
 void GenerateMapWolfenstein(void);
-RayHit cast_ray_dda(float px, float py, float angle);
+RayHit cast_ray_dda(float px, float py, float angle, float player_angle);
 RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_angle);
 Sound CreateBeep(void);
 void BeepDependsOnExitDistance(Sound beep, int px, int py);
@@ -831,7 +831,7 @@ Vec2 GetNextDirToward(int cx, int cy, int tx, int ty)
 //  horizontale) la plus proche.
 // =============================================================
 
-RayHit cast_ray_dda(float px, float py, float angle)
+RayHit cast_ray_dda(float px, float py, float angle, float player_angle)
 {
     // Direction du rayon
     // Le DDA a besoin d'un vecteur de longueur 1 pour que delta_x = 1/rdx soit correct.
@@ -889,14 +889,14 @@ RayHit cast_ray_dda(float px, float py, float angle)
     }
 
     float perp_dist = (side == 0) ? side_x - delta_x : side_y - delta_y;
-    if (perp_dist < 0.001f) perp_dist = 0.001f;
+    if (perp_dist < 0.001f) perp_dist = 0.001f;    
 
     // texX
     float hitX = (side == 0) ? py + perp_dist * rdy : px + perp_dist * rdx;
     hitX -= floorf(hitX);
 
     RayHit hit;
-    hit.dist  = perp_dist;
+    hit.dist  = perp_dist * cosf(angle - player_angle);
     hit.side  = side;
     hit.color = (side == 0) ? WALL_COLOR_NS : WALL_COLOR_EW;
     hit.wallType = MAP[my][mx];
@@ -914,6 +914,8 @@ RayHit cast_ray_dda(float px, float py, float angle)
 
     hit.texX  = fmodf(hitX * TEX_TILE, 1.0f);
 
+    float euc = hit.dist / cosf(angle - player_angle);
+
     hit.mapX = mx;
     hit.mapY = my;
 
@@ -925,13 +927,13 @@ RayHit cast_ray_dda(float px, float py, float angle)
     if (hit.side == 0)
     {
         hit.wx = (float)mx + (step_x < 0 ? 1.0f : 0.0f);
-        hit.wy = py + perp_dist * rdy;
+        hit.wy = py + euc * rdy;
     }
     else
     {
-        hit.wx = px + perp_dist * rdx;
+        hit.wx = px + euc * rdx;
         hit.wy = (float)my + (step_y < 0 ? 1.0f : 0.0f);
-    }
+    }   
 
     return hit;
 }
@@ -1400,7 +1402,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
         float ray_angle = angle + (col - renderW / 2.0f) * (FOV / renderW);
 
         #if DDA_OR_RAYMARCHING
-            RayHit hit = cast_ray_dda(px, py, ray_angle);
+            RayHit hit = cast_ray_dda(px, py, ray_angle, angle);
         #else
             RayHit hit = cast_ray_raymarching(px, py, ray_angle, angle);
         #endif
