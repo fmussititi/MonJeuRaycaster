@@ -27,12 +27,13 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
+#define RENDER_SCALE 2.0 // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 1
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.0001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
 #define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
+#define SHADOW_STEPS 8
 #define NUM_THREADS 8
 
 // ----- Carte du labyrinthe -----
@@ -1447,6 +1448,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
         }
 
         // ── Pré-calcul parallax (dépend de col uniquement) ──────────────
+/*
         // Vecteur caméra → point d'impact
         float vViewWS_x = hit.wx - px;
         float vViewWS_z = hit.wy - py;  // y dans le raycaster = z en 3D
@@ -1458,17 +1460,6 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
         // Projection → tangent space
         float vViewTS_x = vViewWS_x * tangentX + vViewWS_z * tangentZ;
         float vViewTS_z = vViewWS_x * hit.nx   + vViewWS_z * hit.ny;
-
-        //float len_xy    = fabsf(vViewTS_x);  // vViewTS_y = 0 pour murs verticaux
-        //float fLength   = sqrtf(vViewTS_x*vViewTS_x + vViewTS_z*vViewTS_z);
-        //float fParallaxLength = (fabsf(vViewTS_z) > 0.01f) 
-        //                        ? sqrtf(fLength*fLength - vViewTS_z*vViewTS_z) / vViewTS_z 
-        //                        : 0.0f;
-
-        // Direction normalisée (±1 sur X pour murs verticaux)
-        //float dirX = (len_xy > 0.001f) ? vViewTS_x / len_xy : 0.0f;
-
-        //float vParallaxOffsetX = dirX * fParallaxLength * parallaxScale;
         
         float vParallaxOffsetX = (fabsf(vViewTS_z) > 0.01f)
                                 ? (vViewTS_x / vViewTS_z) * parallaxScale
@@ -1503,6 +1494,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             faceSign * (vViewTS_x > 0 ? 1.0f : -1.0f) * fabsf(vParallaxOffsetX) / numLayers,
             0.0f
         };
+*/
 
         // ── Boucle pixel ────────────────────────────────────────────────
         for (int y = draw_top; y < draw_bot; y++)
@@ -1513,26 +1505,93 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             if (texY >= ctx->texH)    texY = ctx->texH - 1;
 
             // ── Steep Parallax Occlusion Mapping ────────────────────────
+            float screenY = ((float)y - (wall_top + wall_h_real*0.5f)) / (wall_h_real*0.5f);
+
+            // vue pixel -> espace caméra
+            float viewX = cosf(ray_angle);
+            float viewY = screenY;
+            float viewZ = sinf(ray_angle);
+
+            float len = sqrtf(
+                viewX*viewX +
+                viewY*viewY +
+                viewZ*viewZ
+            );
+
+            viewX /= len;
+            viewY /= len;
+            viewZ /= len;
+
+            // Tangente depuis la normale stockée dans hit
+            float tangentX = -hit.ny;
+            float tangentZ =  hit.nx;
+
+            // Tangent space
+            float vViewTS_x = viewX*tangentX + viewZ*tangentZ;
+
+            float vViewTS_y = viewY;
+
+            float vViewTS_z = viewX*hit.nx + viewZ*hit.ny;
+
+            float vParallaxOffsetX =
+                (fabsf(vViewTS_z)>0.01f)
+                ? (vViewTS_x/vViewTS_z)*parallaxScale
+                : 0.0f;
+
+            vParallaxOffsetX = fmaxf(-8.0f, fminf(8.0f, vParallaxOffsetX));
+
+            int numLayers = 10 + (int)(fabsf(vParallaxOffsetX) * 250.0f);
+            numLayers = fminf(numLayers, 250);
+
+            float layerDepth   = 1.0f / numLayers;
+
+            float faceSignX = 1.0f;
+            if (hit.side == 0 && hit.nx < 0) faceSignX =  1.0f;
+            if (hit.side == 0 && hit.nx > 0) faceSignX = -1.0f;
+            if (hit.side == 1 && hit.ny < 0) faceSignX = -1.0f;  // inversé
+            if (hit.side == 1 && hit.ny > 0) faceSignX =  1.0f;  // inversé
+
+            float faceSignY = -1.0f;
+
+            float safeZ = fmaxf(fabsf(vViewTS_z),0.05f);
+            
+            typedef struct { float x; float y; } Vec2;
+            
+            Vec2 deltaTex = {
+                faceSignX * vViewTS_x * parallaxScale / (safeZ * numLayers),
+                faceSignY * vViewTS_y * parallaxScale / (safeZ * numLayers)
+            };
+
             float currentTexX     = hit.texX;
+            float currentTexY     = texPos;
             float currentHeight   = 1.0f;
             float currentLayerDepth = 1.0f;
             float prevTexX        = currentTexX;
+            float prevTexY        = currentTexY;
             float prevHeight      = 1.0f;
             float prevLayerDepth  = 1.0f;
 
             for (int i = 0; i < numLayers; i++)
             {
                 prevTexX        = currentTexX;
+                prevTexY        = currentTexY;
+
                 prevHeight      = currentHeight;
                 prevLayerDepth  = currentLayerDepth;
 
-                currentTexX       -= deltaTex.x;
+                currentTexX -= deltaTex.x;
+                currentTexY -= deltaTex.y;
 
-                float wrappedX = currentTexX - floorf(currentTexX);
-                int sampleX = (int)(wrappedX * ctx->texW);
+                float wrappedX=currentTexX-floorf(currentTexX);
+                float wrappedY=currentTexY-floorf(currentTexY);
+
+                int sampleX=(int)(wrappedX*ctx->texW);
+                int sampleY=(int)(wrappedY*ctx->texH);
+
                 sampleX = fmaxf(0, fminf(ctx->texW - 1, sampleX));
+                sampleY = fmaxf(0, fminf(ctx->texH - 1, sampleY));
 
-                currentHeight      = ctx->wallHeight[texY * ctx->texW + sampleX].r / 255.0f;
+                currentHeight      = ctx->wallHeight[sampleY * ctx->texW + sampleX].r / 255.0f;
                 currentLayerDepth -= layerDepth;
 
                 if (currentHeight >= currentLayerDepth) break;
@@ -1553,9 +1612,17 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
 
             finalTexX = fmaxf(0, fminf(ctx->texW - 1, finalTexX));
 
+
+            float finalTexYf = prevTexY * weight + currentTexY * (1.0f - weight);
+            finalTexYf -= floorf(finalTexYf);
+
+            int finalTexY = (int)(finalTexYf * ctx->texH);
+
+            finalTexY = fmaxf(0, fminf(ctx->texH - 1, finalTexY));
+
             // ── Échantillonnage bilinéaire ───────────────────────────────
-            Color s = SampleBilinear(ctx->wallPixels, ctx->texW,  ctx->texH,  finalTexXf, texPos);
-            Color n = SampleBilinear(ctx->wallNormal, ctx->normW, ctx->normH, finalTexXf, texPos);
+            Color s = SampleBilinear(ctx->wallPixels, ctx->texW,  ctx->texH,  finalTexXf, finalTexYf);
+            Color n = SampleBilinear(ctx->wallNormal, ctx->normW, ctx->normH, finalTexXf, finalTexYf);
 
             //Color s = ctx->wallPixels[texY  * ctx->texW + finalTexX];
             //Color n = ctx->wallNormal[texY  * ctx->normW + finalTexX];
@@ -1570,35 +1637,82 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             for (int i = 0; i < numLights; i++) {
                 if (!lc[i].active) continue;
 
-                // ── Shadow ray ──────────────────────────────────────────
-                // Projection lumière en tangent space
-                float lViewTS_x = lc[i].ldx * tangentX + lc[i].ldy * tangentZ;
-                float shadowStep     = lViewTS_x * 0.01f;
-                float shadowTexX     = finalTexXf;
-                float shadowHeight   = currentHeight;
-                float shadow         = 1.0f;
-                int   numShadowSteps = 8;
-                float heightStep     = (1.0f - currentHeight) / numShadowSteps;
+                // ──────────────────────────────────────────────────────
+                // POM Self Shadowing 2D
+                // ──────────────────────────────────────────────────────
+                // hauteur réelle du point POM final
+                float finalHeight = SampleBilinear(ctx->wallHeight,ctx->heightW, ctx->heightH,finalTexXf, finalTexYf).r / 255.0f;
+                // -----------------------------------------------------
+                // direction shadow ray dans tangent space
+                // -----------------------------------------------------
+                // 1. Direction de la lumière de l'impact vers la source (Déjà fait dans ton lc[i])
+                float ldx = lc[i].ldx;
+                float ldy = lc[i].ldy;
+                float ldz = lc[i].ldz; // Composante verticale (hauteur)
 
-                for (int sstep = 0; sstep < numShadowSteps; sstep++)
+                // 2. Projection sur les axes de la texture du mur
+                // Axe horizontal de la texture (X) -> Porté par la tangente du mur
+                float lightTexX = ldx * tangentX + ldy * tangentZ;
+
+                // Axe vertical de la texture (Y) -> Dans un raycaster, la hauteur du mur est l'axe Z global.
+                // Si ton repère de texture Y va du haut vers le bas (0 en haut, 1 au sol) :
+                // Un rayon qui remonte vers la lumière doit aller vers le HAUT de la texture (Y diminue).
+                float lightTexY = -ldz; 
+
+                // Profondeur dans le mur (Z de la heightmap) -> Porté par la normale du mur
+                float lightWallDepth = ldx * hit.nx + ldy * hit.ny;
+
+                // Éviter la division par zéro si la lumière est parfaitement parallèle au mur
+                float safeDepth = fmaxf(fabsf(lightWallDepth), 0.05f);
+
+                // 3. Calcul du décalage de texture par rapport à la profondeur
+                // On cherche de combien la texture se décale quand on remonte d'une unité de hauteur (de 0 à 1)
+                Vec2 shadowDelta = {
+                    (lightTexX / safeDepth) * parallaxScale,
+                    (lightTexY / safeDepth) * parallaxScale
+                };
+
+                // 4. Paramètres de la boucle
+                float heightStep = 1.0f / (float)SHADOW_STEPS;
+
+                // Un biais minuscule pour éviter que la brique s'auto-ombre elle-même à cause des arrondis
+                float shadowBias = 0.005f; 
+
+                // On commence au point trouvé par le POM, légèrement surélevé par le biais
+                float shadowTexX   = finalTexXf + shadowDelta.x * shadowBias;
+                float shadowTexY   = finalTexYf + shadowDelta.y * shadowBias;
+                float shadowHeight = finalHeight + shadowBias;
+
+                float shadow = 1.0f;
+
+                // 5. La marche d'ombre (on monte vers la surface 1.0)
+                for(int s = 0; s < SHADOW_STEPS; s++)
                 {
-                    shadowTexX   += shadowStep;
+                    // On avance dans la texture proportionnellement au pas vertical
+                    shadowTexX += shadowDelta.x * heightStep;
+                    shadowTexY += shadowDelta.y * heightStep;
                     shadowHeight += heightStep;
 
-                    if (shadowHeight >= 1.0f) break;  // sorti de la surface
+                    // Si le rayon a dépassé la surface de la brique (1.0), il est au soleil
+                    if(shadowHeight >= 1.0f) break; 
 
-                    float wrappedSX = shadowTexX - floorf(shadowTexX);
-                    float sampleH   = SampleBilinear(ctx->wallHeight, ctx->heightW, 
-                                                    ctx->heightH, wrappedSX, texPos).r / 255.0f;
+                    // Répétition/Tuilage de la texture (Wrap)
+                    float u = shadowTexX - floorf(shadowTexX);
+                    float v = shadowTexY - floorf(shadowTexY);
 
-                    if (sampleH > shadowHeight)
+                    // Échantillonnage de la hauteur à cette nouvelle position
+                    float sampleH = SampleBilinear(ctx->wallHeight, ctx->heightW, ctx->heightH, u, v).r / 255.0f;
+
+                    // Si la brique à cet endroit est plus haute que notre rayon : OBSTRUCTION !
+                    if(sampleH > shadowHeight)
                     {
-                        float t = 1.0f - (float)sstep / numShadowSteps;
-                        shadow = 1.0f - t * 0.65f;
+                        // Plus l'obstacle est haut par rapport au rayon, plus l'ombre est forte
+                        float distanceIntoWall = sampleH - shadowHeight;
+                        shadow = fmaxf(0.35f, 1.0f - (distanceIntoWall * 5.0f)); 
                         break;
                     }
                 }
-                // ─────────────────────────────────────────────────────
+                // ──────────────────────────────────────────────────────
 
 
                 float diff = fmaxf(0.0f, nnx*lc[i].ldx + nny*lc[i].ldy + nnz*lc[i].ldz);
