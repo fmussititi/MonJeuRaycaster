@@ -32,9 +32,10 @@ int renderW, renderH, halfRenderH;
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.0001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
-#define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
+#define DDA_OR_RAYMARCHING 0 // 0 --> RayMarching; 1 --> DDA
 #define SHADOW_STEPS 16
-#define PARALLAX_STEPS 64.0f
+#define PARALLAX_STEPS 42.0f
+#define PARALLAX_SCALE 0.1f
 #define NUM_THREADS 8
 
 // ----- Carte du labyrinthe -----
@@ -68,7 +69,7 @@ float pitch = 0.0f;
 bool playSoundOneTime = true;
 bool playBeepSound = true;
 float pulseRadius = 0.0f;
-float parallaxScale = 0.25f;
+float parallaxScale = PARALLAX_SCALE;
 
 pthread_t threads[NUM_THREADS];
 pthread_barrier_t barrierStart;
@@ -360,7 +361,7 @@ void ResetGame(float *px, float *py)
 
     pitch     = 0.0f;
     gameTimer = 0.0f;
-    parallaxScale = 0.25f;
+    parallaxScale = PARALLAX_SCALE;
     gameState = STATE_PLAY;
     traceOn   = false;
     playSoundOneTime = true;
@@ -1673,11 +1674,15 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
                     (lightTexY / safeDepth) * parallaxScale
                 };
 
+                // Clamp le delta ombre pour éviter les grands sauts
+                shadowDelta.x = fmaxf(-0.5f, fminf(0.5f, shadowDelta.x));
+                shadowDelta.y = fmaxf(-0.5f, fminf(0.5f, shadowDelta.y));
+
                 // 4. Paramètres de la boucle
                 float heightStep = 1.0f / (float)SHADOW_STEPS;
 
                 // Un biais minuscule pour éviter que la brique s'auto-ombre elle-même à cause des arrondis
-                float shadowBias = 0.005f; 
+                float shadowBias = 0.02f; 
 
                 // On commence au point trouvé par le POM, légèrement surélevé par le biais
                 float shadowTexX   = finalTexXf + shadowDelta.x * shadowBias;
@@ -1709,7 +1714,8 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
                     {
                         // Plus l'obstacle est haut par rapport au rayon, plus l'ombre est forte
                         float distanceIntoWall = sampleH - shadowHeight;
-                        shadow = fmaxf(0.35f, 1.0f - (distanceIntoWall * 5.0f)); 
+                        float distanceFactor = 1.0f - (float)s / SHADOW_STEPS;
+                        shadow = fmaxf(0.35f, 1.0f - (distanceIntoWall * 5.0f * distanceFactor)); 
                         break;
                     }
                 }
