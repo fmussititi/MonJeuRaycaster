@@ -32,7 +32,7 @@ int renderW, renderH, halfRenderH;
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
-#define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
+#define DDA_OR_RAYMARCHING 0 // 0 --> RayMarching; 1 --> DDA
 #define NUM_THREADS 8
 
 // ----- Carte du labyrinthe -----
@@ -806,7 +806,6 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
     float distance = 0.0f;
     
     int mx, my;
-    int side = 0;
 
     int prev_x, prev_y;
 
@@ -830,16 +829,7 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
         prev_y = (int)(cur_y - rdy * STEP_SIZE);
 
         // Collision murale ?
-        if (MAP[my][mx] != 0) {
-            // Petite astuce pour déterminer grossièrement le "côté" pour la couleur
-            // On regarde si on est plus proche du bord horizontal ou vertical de la case
-            float hit_x = cur_x - mx;
-            float hit_y = cur_y - my;
-            
-            // Si on est proche du haut ou du bas de la case
-            if (fabsf(hit_x - 0.5f) > fabsf(hit_y - 0.5f)) side = 1;
-            else side = 0; 
-            
+        if (MAP[my][mx] != 0) {            
             break;
         }
     }
@@ -850,8 +840,6 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
     
     RayHit hit;
     hit.dist  = distance * cosf(ray_angle - player_angle); 
-    hit.side  = side;
-    hit.color = (side == 0) ? WALL_COLOR_NS : WALL_COLOR_EW;
     hit.wallType = MAP[my][mx];    
 
     if (TRACES[prev_y][prev_x] == 1.0f) hit.wallType = 3;
@@ -859,16 +847,6 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
     if (TRACES[prev_y][prev_x] == 3.0f) hit.wallType = 5;
 
     if (MAP[my][mx] == 2) hit.wallType = 2;
-
-    float hitX;
-
-    if (side == 0)
-        hitX = px + hit.dist * rdx;
-    else
-        hitX = py + hit.dist * rdy;
-
-    hitX -= floorf(hitX);   // partie fractionnaire = coordonnée dans la case
-    hit.texX = fmodf(hitX * TEX_TILE, 1.0f);
 
     hit.mapX = mx;
     hit.mapY = my;
@@ -898,6 +876,24 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
     if(dBottom < minDist){
         hit.nx=0; hit.ny=1;
     }
+    
+    float hitX;
+
+    if (fabsf(hit.nx) > 0.5f)
+    {
+        // mur vertical → utiliser Y
+        hitX = hit.wy;
+    }
+    else
+    {
+        // mur horizontal → utiliser X
+        hitX = hit.wx;
+    }
+
+    hitX -= floorf(hitX);
+    hit.texX = fmodf(hitX * TEX_TILE, 1.0f);
+
+    hit.side = (fabsf(hit.nx) > 0.5f) ? 0 : 1;
 
     return hit;
 }
