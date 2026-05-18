@@ -30,7 +30,7 @@ int renderW, renderH, halfRenderH;
 #define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
 #define COL_STEP 1
 #define FXAA 0
-#define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
+#define RAY_MARCHING_STEP_SIZE 0.0001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
 #define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
 #define NUM_THREADS 8
@@ -358,6 +358,7 @@ void ResetGame(float *px, float *py)
 
     pitch     = 0.0f;
     gameTimer = 0.0f;
+    parallaxScale = 0.25f;
     gameState = STATE_PLAY;
     traceOn   = false;
     playSoundOneTime = true;
@@ -1458,19 +1459,24 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
         float vViewTS_x = vViewWS_x * tangentX + vViewWS_z * tangentZ;
         float vViewTS_z = vViewWS_x * hit.nx   + vViewWS_z * hit.ny;
 
-        float len_xy    = fabsf(vViewTS_x);  // vViewTS_y = 0 pour murs verticaux
-        float fLength   = sqrtf(vViewTS_x*vViewTS_x + vViewTS_z*vViewTS_z);
-        float fParallaxLength = (fabsf(vViewTS_z) > 0.01f) 
-                                ? sqrtf(fLength*fLength - vViewTS_z*vViewTS_z) / vViewTS_z 
-                                : 0.0f;
+        //float len_xy    = fabsf(vViewTS_x);  // vViewTS_y = 0 pour murs verticaux
+        //float fLength   = sqrtf(vViewTS_x*vViewTS_x + vViewTS_z*vViewTS_z);
+        //float fParallaxLength = (fabsf(vViewTS_z) > 0.01f) 
+        //                        ? sqrtf(fLength*fLength - vViewTS_z*vViewTS_z) / vViewTS_z 
+        //                        : 0.0f;
 
         // Direction normalisée (±1 sur X pour murs verticaux)
-        float dirX = (len_xy > 0.001f) ? vViewTS_x / len_xy : 0.0f;
+        //float dirX = (len_xy > 0.001f) ? vViewTS_x / len_xy : 0.0f;
 
-        float vParallaxOffsetX = dirX * fParallaxLength * parallaxScale;
+        //float vParallaxOffsetX = dirX * fParallaxLength * parallaxScale;
+        
+        float vParallaxOffsetX = (fabsf(vViewTS_z) > 0.01f)
+                                ? (vViewTS_x / vViewTS_z) * parallaxScale
+                                : 0.0f;
+
         vParallaxOffsetX = fmaxf(-8.0f, fminf(8.0f, vParallaxOffsetX));
 
-        int numLayers = 10 + (int)(fabsf(vParallaxOffsetX) * 250.0f);
+        int numLayers = 10 + (int)(fabsf(vParallaxOffsetX) * 128.0f);
         numLayers = fminf(numLayers, 250);
 
         //float parallaxScale = 0.25f;
@@ -1571,7 +1577,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
                 float shadowTexX     = finalTexXf;
                 float shadowHeight   = currentHeight;
                 float shadow         = 1.0f;
-                int   numShadowSteps = 16;
+                int   numShadowSteps = 8;
                 float heightStep     = (1.0f - currentHeight) / numShadowSteps;
 
                 for (int sstep = 0; sstep < numShadowSteps; sstep++)
