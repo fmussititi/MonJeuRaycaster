@@ -27,15 +27,17 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.3 // 1 = natif, 2 = moitié, 4 = quart
-#define COL_STEP 3
+#define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
+#define COL_STEP 2
 #define FXAA 0
-#define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
-#define TEX_TILE 2.0f
-#define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
-#define SHADOW_STEPS 10
-#define PARALLAX_STEPS 12
-#define PARALLAX_SCALE 0.095f
+#define RAYCASTER_TYPE 1 // RAYMARCHING = 0 / DDA = 1
+#define RAYMARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
+#define RAYMARCHING_RAY_LIMIT 10.0f
+#define TEX_TILE 1.0f
+#define SHADOW_STEPS 8
+#define PARALLAX_STEPS_MIN 32
+#define PARALLAX_STEPS_MAX 64
+#define PARALLAX_SCALE 0.10f
 #define NUM_THREADS 8
 
 // ----- Carte du labyrinthe -----
@@ -1005,7 +1007,7 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
     float rdy = LUTsin(ray_angle);
 
     // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
-    const float STEP_SIZE = RAY_MARCHING_STEP_SIZE; 
+    const float STEP_SIZE = RAYMARCHING_STEP_SIZE; 
     float distance = 0.0f;
     
     int mx, my;
@@ -1013,7 +1015,7 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
     int prev_x, prev_y;
 
     // On avance petit à petit
-    while (distance < 20.0f) // Limite de portée du rayon
+    while (distance < RAYMARCHING_RAY_LIMIT) // Limite de portée du rayon
     {
         distance += STEP_SIZE;
         
@@ -1466,7 +1468,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
     {
         float ray_angle = angle + (col - renderW / 2.0f) * (FOV / renderW);
 
-        #if DDA_OR_RAYMARCHING
+        #if RAYCASTER_TYPE
             RayHit hit = cast_ray_dda(px, py, ray_angle, angle);
         #else
             RayHit hit = cast_ray_raymarching(px, py, ray_angle, angle);
@@ -1561,7 +1563,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
             float vParallaxOffsetX = (localSafeZ > 0.01f) ? (localTS_x / localSafeZ) * parallaxScale : 0.0f;
             vParallaxOffsetX = fmaxf(-8.0f, fminf(8.0f, vParallaxOffsetX));
 
-            int numLayers = 10 + (int)(fabsf(vParallaxOffsetX) * PARALLAX_STEPS);
+            int numLayers = PARALLAX_STEPS_MIN + (int)(fabsf(vParallaxOffsetX) * PARALLAX_STEPS_MAX);
             if (numLayers > 250) numLayers = 250;
 
             float layerDepth = 1.0f / numLayers;
@@ -1678,6 +1680,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
                     {
                         float distanceIntoWall = sampleH - shadowHeight;
                         float distanceFactor = 1.0f - (float)s_step / SHADOW_STEPS;
+                        //float distanceFactor = 1.0f;
                         shadow = fmaxf(0.35f, 1.0f - (distanceIntoWall * 5.0f * distanceFactor)); 
                         break;
                     }
