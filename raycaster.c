@@ -27,8 +27,8 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 1.5 // 1 = natif, 2 = moitié, 4 = quart
-#define COL_STEP 2
+#define RENDER_SCALE 2.0 // 1 = natif, 2 = moitié, 4 = quart
+#define COL_STEP 1
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
@@ -868,7 +868,36 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
         hitX = py + hit.dist * rdy;
 
     hitX -= floorf(hitX);   // partie fractionnaire = coordonnée dans la case
-    hit.texX = fmodf(hitX * TEX_TILE, 1.0f);;
+    hit.texX = fmodf(hitX * TEX_TILE, 1.0f);
+
+    hit.mapX = mx;
+    hit.mapY = my;
+
+    hit.wx = px + rdx * distance;
+    hit.wy = py + rdy * distance;
+
+    float localX = hit.wx - floorf(hit.wx);
+    float localY = hit.wy - floorf(hit.wy);
+
+    float dLeft   = localX;
+    float dRight  = 1.0f - localX;
+    float dTop    = localY;
+    float dBottom = 1.0f - localY;
+
+    float minDist = dLeft;
+    hit.nx=-1; hit.ny=0;
+
+    if(dRight < minDist){
+        minDist=dRight;
+        hit.nx=1; hit.ny=0;
+    }
+    if(dTop < minDist){
+        minDist=dTop;
+        hit.nx=0; hit.ny=-1;
+    }
+    if(dBottom < minDist){
+        hit.nx=0; hit.ny=1;
+    }
 
     return hit;
 }
@@ -1432,10 +1461,8 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
         float vParallaxOffsetX = dirX * fParallaxLength * parallaxScale;
         vParallaxOffsetX = fmaxf(-8.0f, fminf(8.0f, vParallaxOffsetX));
 
-        int numLayers = 10 + (int)(fabsf(vParallaxOffsetX) * 64.0f);
-        numLayers = fminf(numLayers, 150);
-
-        numLayers = 64;
+        int numLayers = 100 + (int)(fabsf(vParallaxOffsetX) * 250.0f);
+        numLayers = fminf(numLayers, 250);
 
         //float parallaxScale = 0.25f;
         float layerDepth   = 1.0f / numLayers;
