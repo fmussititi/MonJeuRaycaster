@@ -33,7 +33,8 @@ int renderW, renderH, halfRenderH;
 #define RAY_MARCHING_STEP_SIZE 0.0001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
 #define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
-#define SHADOW_STEPS 8
+#define SHADOW_STEPS 16
+#define PARALLAX_STEPS 64.0f
 #define NUM_THREADS 8
 
 // ----- Carte du labyrinthe -----
@@ -1540,7 +1541,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
 
             vParallaxOffsetX = fmaxf(-8.0f, fminf(8.0f, vParallaxOffsetX));
 
-            int numLayers = 10 + (int)(fabsf(vParallaxOffsetX) * 250.0f);
+            int numLayers = 10 + (int)(fabsf(vParallaxOffsetX) * PARALLAX_STEPS);
             numLayers = fminf(numLayers, 250);
 
             float layerDepth   = 1.0f / numLayers;
