@@ -27,8 +27,8 @@ int renderW, renderH, halfRenderH;
 #define FOV          (PI / 3)   // 60 degrés
 
 // ------ Parametres de qualite/performance du rendu ------
-#define RENDER_SCALE 2.5 // 1 = natif, 2 = moitié, 4 = quart
-#define COL_STEP 1
+#define RENDER_SCALE 1.3 // 1 = natif, 2 = moitié, 4 = quart
+#define COL_STEP 3
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
