@@ -208,6 +208,7 @@ void RenderFloorCeil(Context* ctx, float px, float py, float angle, int horizon)
 void* RenderWallsThread(void* arg);
 void initThreads(Context ctx);
 static inline Color SampleBilinear(Color* tex, int texW, int texH,  float u, float v);
+static inline float SampleHeight(Color* tex, int texW, int texH, float u, float v);
 // --------------------------------------------------------------------
 
 #pragma region UTILES
@@ -1391,6 +1392,21 @@ void KeysAndJoypadHandler(float* angle, float* px, float* py, float dt)
 
 
 #pragma region RENDU
+
+static inline float SampleHeight(Color* tex, int texW, int texH, float u, float v)
+{
+    u -= floorf(u);
+    v -= floorf(v);
+
+    int x = (int)(u * texW);
+    int y = (int)(v * texH);
+
+    if (x >= texW) x = texW - 1;
+    if (y >= texH) y = texH - 1;
+
+    return tex[y * texW + x].r / 255.0f;
+}
+
 // =============================================================
 //  Fonction de rendu à utiliser dans RenderFrame
 // =============================================================
@@ -1645,7 +1661,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
                 // POM Self Shadowing 2D
                 // ──────────────────────────────────────────────────────
                 // hauteur réelle du point POM final
-                float finalHeight = SampleBilinear(ctx->wallHeight,ctx->heightW, ctx->heightH,finalTexXf, finalTexYf).r / 255.0f;
+                float finalHeight = SampleHeight(ctx->wallHeight, ctx->heightW, ctx->heightH, finalTexXf, finalTexYf);
                 // -----------------------------------------------------
                 // direction shadow ray dans tangent space
                 // -----------------------------------------------------
@@ -1709,7 +1725,7 @@ void RenderWalls(Context* ctx, int startX, int endX, float px, float py, float a
                     float v = shadowTexY - floorf(shadowTexY);
 
                     // Échantillonnage de la hauteur à cette nouvelle position
-                    float sampleH = SampleBilinear(ctx->wallHeight, ctx->heightW, ctx->heightH, u, v).r / 255.0f;
+                    float sampleH = SampleHeight(ctx->wallHeight, ctx->heightW, ctx->heightH, u, v);
 
                     // Si la brique à cet endroit est plus haute que notre rayon : OBSTRUCTION !
                     if(sampleH > shadowHeight)
