@@ -32,7 +32,7 @@ int renderW, renderH, halfRenderH;
 #define FXAA 0
 #define RAY_MARCHING_STEP_SIZE 0.001f // Taille du pas (plus c'est petit, plus c'est précis, mais plus c'est lent)
 #define TEX_TILE 2.0f
-#define DDA_OR_RAYMARCHING 0 // 0 --> RayMarching; 1 --> DDA
+#define DDA_OR_RAYMARCHING 1 // 0 --> RayMarching; 1 --> DDA
 #define NUM_THREADS 8
 
 // ----- Carte du labyrinthe -----
@@ -206,6 +206,8 @@ void* RenderWallsThread(void* arg);
 void initThreads(Context ctx);
 static inline Color SampleBilinear(Color* tex, int texW, int texH,  float u, float v);
 // --------------------------------------------------------------------
+
+#pragma region UTILES
 /*
 static inline Color SampleBilinear(Color* tex, int texW, int texH, float u, float v)
 {
@@ -316,6 +318,158 @@ void initThreads(Context ctx)
         pthread_create(&threads[i], NULL, RenderWallsThread, &td[i]);
 }
 
+static inline Color MixColor(Color a, Color b, float t)
+{
+    return (Color){
+        (unsigned char)(a.r + (b.r - a.r) * t),
+        (unsigned char)(a.g + (b.g - a.g) * t),
+        (unsigned char)(a.b + (b.b - a.b) * t),
+        255
+    };
+}
+
+void ResetGame(float *px, float *py)
+{
+    GenerateMapRandomWalk();
+    ComputeDeadEndBranches();
+
+    // Spawner le joueur loin de la sortie
+    SpawnPoint sp = GetRandomFreeCell(exitX, exitY, 8.0f);
+    *px = sp.x;
+    *py = sp.y;
+
+    // Spawner les lumières adverses
+    float lastX = *px, lastY = *py;
+    for (int i = 0; i < PATROL_LIGHTS; i++)
+    {
+        SpawnPoint lp = GetRandomFreeCell(lastX, lastY, 5.0f);
+        lights[i].x = lp.x;
+        lights[i].y = lp.y;
+        patrolLights[i].lastGridX = (int)lp.x;
+        patrolLights[i].lastGridY = (int)lp.y;
+        Vec2 d = GetNextDirToward((int)lp.x, (int)lp.y, exitX, exitY);
+        patrolLights[i].dx = (d.x != 0 || d.y != 0) ? d.x : 1.0f;
+        patrolLights[i].dy = (d.x != 0 || d.y != 0) ? d.y : 0.0f;
+
+        // Chaque lumière spawne loin de la précédente
+        lastX = lp.x;
+        lastY = lp.y;
+    }
+
+    pitch     = 0.0f;
+    gameTimer = 0.0f;
+    gameState = STATE_PLAY;
+    traceOn   = false;
+    playSoundOneTime = true;
+    playBeepSound    = true;
+
+    for (int i=0; i<PATROL_LIGHTS; i++)
+    {
+        patrolLights[i].chasing = false;
+
+        tmpLightColor[i].r = patrolLights[i].l->r;
+        tmpLightColor[i].g = patrolLights[i].l->g;
+        tmpLightColor[i].b = patrolLights[i].l->b;
+    }
+
+    if (!SolveMaze(*px, *py)) gameState = STATE_MAZE_NOT_READY;
+    memset(TRACES, 0, sizeof(TRACES));
+}
+
+// =============================================================
+//  Minimap (vue du dessus pour déboguer)
+// =============================================================
+
+void draw_minimap(float px, float py, float angle)
+{
+    const int TILE  = 8;    // taille d'une case en pixels
+    const int OX    = 10;   // offset en haut à gauche
+    const int OY    = 10;
+
+    // Grille
+    for (int y = 0; y < MAP_H; y++) {
+        for (int x = 0; x < MAP_W; x++) {
+            Color c = MAP[y][x] ? (Color){200,200,200,200}
+                                : (Color){ 20, 20, 20,180};
+            DrawRectangle(OX + x*TILE, OY + y*TILE, TILE-1, TILE-1, c);
+            
+            // Dessin de la trace par-dessus le couloir
+            if (MAP[y][x] == 0 && TRACES[y][x] > 0) {
+                Color traceColor = { 255, 255, 255, (unsigned char)(TRACES[y][x] * 100) }; 
+                DrawRectangle(OX + x*TILE, OY + y*TILE, TILE-1, TILE-1, traceColor);
+            }
+
+            if (MAP[y][x]==2) DrawRectangle(OX + x*TILE, OY + y*TILE, TILE-1, TILE-1, GOLD);
+        }
+    }
+
+    // Joueur
+    int ppx = OX + (int)(px * TILE);
+    int ppy = OY + (int)(py * TILE);
+    DrawCircle(ppx, ppy, 3, YELLOW);
+
+    // Direction
+    DrawLine(ppx, ppy,
+             ppx + (int)(cosf(angle) * 10),
+             ppy + (int)(sinf(angle) * 10),
+             YELLOW);
+
+    // Lumières patrouilles
+    for (int i = 0; i < PATROL_LIGHTS; i++) {
+        int lpx = OX + (int)(patrolLights[i].l->x * TILE);
+        int lpy = OY + (int)(patrolLights[i].l->y * TILE);
+        //Color lc = (i == 0) ? (Color){255, 200, 50, 255} : (Color){50, 150, 255, 255};
+        Color lc = (Color){(int)(fminf(patrolLights[i].l->r, 1.0f) * 255.0), 
+                           (int)(fminf(patrolLights[i].l->g, 1.0f) * 255.0), 
+                           (int)(fminf(patrolLights[i].l->b, 1.0f) * 255.0), 255};
+        DrawCircle(lpx, lpy, 4, lc);
+
+        // Direction de la lumière
+        DrawLine(lpx, lpy,
+                lpx + (int)(patrolLights[i].dx * 8),
+                lpy + (int)(patrolLights[i].dy * 8),
+                lc);
+    }
+}
+
+void apply_fxaa(Color *fb, Color *tmp, int w, int h)
+{
+    memcpy(tmp, fb, w * h * sizeof(Color));
+
+    for (int y = 1; y < h - 1; y++)
+    for (int x = 1; x < w - 1; x++)
+    {
+        Color c  = tmp[y*w + x];
+        Color n  = tmp[(y-1)*w + x];
+        Color s  = tmp[(y+1)*w + x];
+        Color e  = tmp[y*w + x+1];
+        Color ww = tmp[y*w + x-1];
+
+        // Détection de contour (luminance)
+        float lC = 0.299f*c.r  + 0.587f*c.g  + 0.114f*c.b;
+        float lN = 0.299f*n.r  + 0.587f*n.g  + 0.114f*n.b;
+        float lS = 0.299f*s.r  + 0.587f*s.g  + 0.114f*s.b;
+        float lE = 0.299f*e.r  + 0.587f*e.g  + 0.114f*e.b;
+        float lW = 0.299f*ww.r + 0.587f*ww.g + 0.114f*ww.b;
+
+        float edge = fabsf(lN-lS) + fabsf(lE-lW);
+
+        if (edge > 8.0f)  // seuil — ajuster selon le rendu
+        {
+            // Moyenne des voisins sur les contours
+            fb[y*w + x] = (Color){
+                (c.r + n.r + s.r + e.r + ww.r) / 5,
+                (c.g + n.g + s.g + e.g + ww.g) / 5,
+                (c.b + n.b + s.b + e.b + ww.b) / 5,
+                255
+            };
+        }
+    }
+}
+#pragma endregion
+
+
+#pragma region GENERATION MAZE MAP
 static int DEADEND_BRANCH[MAP_H][MAP_W] = {0};
 
 void ComputeDeadEndBranches(void)
@@ -371,16 +525,6 @@ void ComputeDeadEndBranches(void)
     }
 }
 
-static inline Color MixColor(Color a, Color b, float t)
-{
-    return (Color){
-        (unsigned char)(a.r + (b.r - a.r) * t),
-        (unsigned char)(a.g + (b.g - a.g) * t),
-        (unsigned char)(a.b + (b.b - a.b) * t),
-        255
-    };
-}
-
 // Trouve une case libre aléatoire dans la map
 // Evite la sortie et une distance minimale d'un autre point
 SpawnPoint GetRandomFreeCell(float avoidX, float avoidY, float minDist)
@@ -401,54 +545,6 @@ SpawnPoint GetRandomFreeCell(float avoidX, float avoidY, float minDist)
     }
     // Fallback si rien trouvé
     return (SpawnPoint){ 1.5f, 1.5f };
-}
-
-void ResetGame(float *px, float *py)
-{
-    GenerateMapRandomWalk();
-    ComputeDeadEndBranches();
-
-    // Spawner le joueur loin de la sortie
-    SpawnPoint sp = GetRandomFreeCell(exitX, exitY, 8.0f);
-    *px = sp.x;
-    *py = sp.y;
-
-    // Spawner les lumières adverses
-    float lastX = *px, lastY = *py;
-    for (int i = 0; i < PATROL_LIGHTS; i++)
-    {
-        SpawnPoint lp = GetRandomFreeCell(lastX, lastY, 5.0f);
-        lights[i].x = lp.x;
-        lights[i].y = lp.y;
-        patrolLights[i].lastGridX = (int)lp.x;
-        patrolLights[i].lastGridY = (int)lp.y;
-        Vec2 d = GetNextDirToward((int)lp.x, (int)lp.y, exitX, exitY);
-        patrolLights[i].dx = (d.x != 0 || d.y != 0) ? d.x : 1.0f;
-        patrolLights[i].dy = (d.x != 0 || d.y != 0) ? d.y : 0.0f;
-
-        // Chaque lumière spawne loin de la précédente
-        lastX = lp.x;
-        lastY = lp.y;
-    }
-
-    pitch     = 0.0f;
-    gameTimer = 0.0f;
-    gameState = STATE_PLAY;
-    traceOn   = false;
-    playSoundOneTime = true;
-    playBeepSound    = true;
-
-    for (int i=0; i<PATROL_LIGHTS; i++)
-    {
-        patrolLights[i].chasing = false;
-
-        tmpLightColor[i].r = patrolLights[i].l->r;
-        tmpLightColor[i].g = patrolLights[i].l->g;
-        tmpLightColor[i].b = patrolLights[i].l->b;
-    }
-
-    if (!SolveMaze(*px, *py)) gameState = STATE_MAZE_NOT_READY;
-    memset(TRACES, 0, sizeof(TRACES));
 }
 
 // Mélange un tableau de directions (Fisher-Yates simple)
@@ -672,6 +768,56 @@ void GenerateMapWolfenstein(void)
     MAP[exitY][exitX] = 2;
 }
 
+Vec2 GetNextDirToward(int cx, int cy, int tx, int ty)
+{
+    // BFS depuis position courante vers cible
+    int prev[MAP_H][MAP_W][2];  // stocke le parent de chaque case
+    memset(prev, -1, sizeof(prev));
+
+    typedef struct { int x, y; } Cell;
+    Cell queue[MAP_W * MAP_H];
+    int head = 0, tail = 0;
+
+    queue[tail++] = (Cell){cx, cy};
+    prev[cy][cx][0] = cx;
+    prev[cy][cx][1] = cy;
+
+    bool found = false;
+    while (head < tail && !found) {
+        Cell curr = queue[head++];
+        if (curr.x == tx && curr.y == ty) { found = true; break; }
+
+        int ddx[] = {1,-1,0,0};
+        int ddy[] = {0,0,1,-1};
+        for (int d = 0; d < 4; d++) {
+            int nx = curr.x + ddx[d];
+            int ny = curr.y + ddy[d];
+            if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
+            if (MAP[ny][nx] == 1) continue;
+            if (prev[ny][nx][0] != -1) continue;
+            prev[ny][nx][0] = curr.x;
+            prev[ny][nx][1] = curr.y;
+            queue[tail++] = (Cell){nx, ny};
+        }
+    }
+
+    if (!found) return (Vec2){0, 0};
+
+    // Remonter le chemin jusqu'au premier pas
+    Cell step = {tx, ty};
+    while (prev[step.y][step.x][0] != cx || prev[step.y][step.x][1] != cy) {
+        int px2 = prev[step.y][step.x][0];
+        int py2 = prev[step.y][step.x][1];
+        if (px2 == cx && py2 == cy) break;
+        step = (Cell){px2, py2};
+    }
+
+    return (Vec2){step.x - cx, step.y - cy};
+}
+#pragma endregion
+
+
+#pragma region DDA ET RAYMARCHING
 // =============================================================
 //  Algorithme DDA (Digital Differential Analyzer)
 //
@@ -786,6 +932,7 @@ RayHit cast_ray_dda(float px, float py, float angle)
     return hit;
 }
 
+
 // =============================================================
 //  Algorithme Raymraching par step constant
 //
@@ -897,8 +1044,10 @@ RayHit cast_ray_raymarching(float px, float py, float ray_angle, float player_an
 
     return hit;
 }
+#pragma endregion
 
 
+#pragma region SONS
 // =============================================================
 //  Creation de sons proceduraux
 // =============================================================
@@ -1090,43 +1239,10 @@ void BeepDependsOnExitDistance(Sound beep, int px, int py)
         pulseRadius = 20.0f; 
     }
 }
-
-void apply_fxaa(Color *fb, Color *tmp, int w, int h)
-{
-    memcpy(tmp, fb, w * h * sizeof(Color));
-
-    for (int y = 1; y < h - 1; y++)
-    for (int x = 1; x < w - 1; x++)
-    {
-        Color c  = tmp[y*w + x];
-        Color n  = tmp[(y-1)*w + x];
-        Color s  = tmp[(y+1)*w + x];
-        Color e  = tmp[y*w + x+1];
-        Color ww = tmp[y*w + x-1];
-
-        // Détection de contour (luminance)
-        float lC = 0.299f*c.r  + 0.587f*c.g  + 0.114f*c.b;
-        float lN = 0.299f*n.r  + 0.587f*n.g  + 0.114f*n.b;
-        float lS = 0.299f*s.r  + 0.587f*s.g  + 0.114f*s.b;
-        float lE = 0.299f*e.r  + 0.587f*e.g  + 0.114f*e.b;
-        float lW = 0.299f*ww.r + 0.587f*ww.g + 0.114f*ww.b;
-
-        float edge = fabsf(lN-lS) + fabsf(lE-lW);
-
-        if (edge > 8.0f)  // seuil — ajuster selon le rendu
-        {
-            // Moyenne des voisins sur les contours
-            fb[y*w + x] = (Color){
-                (c.r + n.r + s.r + e.r + ww.r) / 5,
-                (c.g + n.g + s.g + e.g + ww.g) / 5,
-                (c.b + n.b + s.b + e.b + ww.b) / 5,
-                255
-            };
-        }
-    }
-}
+#pragma endregion
 
 
+#pragma region KEY AND GAMEPAD
 void KeysAndJoypadHandler(float* angle, float* px, float* py, float dt)
 {
     if (gameState == STATE_WIN || gameState == STATE_LOST|| gameState == STATE_LOST_BY_CHASING
@@ -1265,113 +1381,10 @@ void KeysAndJoypadHandler(float* angle, float* px, float* py, float dt)
     if (parallaxScale < 0.0f) parallaxScale = 0.0f;
     if (parallaxScale > 0.5f) parallaxScale = 0.5f;
 }
+#pragma endregion
 
 
-Vec2 GetNextDirToward(int cx, int cy, int tx, int ty)
-{
-    // BFS depuis position courante vers cible
-    int prev[MAP_H][MAP_W][2];  // stocke le parent de chaque case
-    memset(prev, -1, sizeof(prev));
-
-    typedef struct { int x, y; } Cell;
-    Cell queue[MAP_W * MAP_H];
-    int head = 0, tail = 0;
-
-    queue[tail++] = (Cell){cx, cy};
-    prev[cy][cx][0] = cx;
-    prev[cy][cx][1] = cy;
-
-    bool found = false;
-    while (head < tail && !found) {
-        Cell curr = queue[head++];
-        if (curr.x == tx && curr.y == ty) { found = true; break; }
-
-        int ddx[] = {1,-1,0,0};
-        int ddy[] = {0,0,1,-1};
-        for (int d = 0; d < 4; d++) {
-            int nx = curr.x + ddx[d];
-            int ny = curr.y + ddy[d];
-            if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
-            if (MAP[ny][nx] == 1) continue;
-            if (prev[ny][nx][0] != -1) continue;
-            prev[ny][nx][0] = curr.x;
-            prev[ny][nx][1] = curr.y;
-            queue[tail++] = (Cell){nx, ny};
-        }
-    }
-
-    if (!found) return (Vec2){0, 0};
-
-    // Remonter le chemin jusqu'au premier pas
-    Cell step = {tx, ty};
-    while (prev[step.y][step.x][0] != cx || prev[step.y][step.x][1] != cy) {
-        int px2 = prev[step.y][step.x][0];
-        int py2 = prev[step.y][step.x][1];
-        if (px2 == cx && py2 == cy) break;
-        step = (Cell){px2, py2};
-    }
-
-    return (Vec2){step.x - cx, step.y - cy};
-}
-
-
-// =============================================================
-//  Minimap (vue du dessus pour déboguer)
-// =============================================================
-
-void draw_minimap(float px, float py, float angle)
-{
-    const int TILE  = 8;    // taille d'une case en pixels
-    const int OX    = 10;   // offset en haut à gauche
-    const int OY    = 10;
-
-    // Grille
-    for (int y = 0; y < MAP_H; y++) {
-        for (int x = 0; x < MAP_W; x++) {
-            Color c = MAP[y][x] ? (Color){200,200,200,200}
-                                : (Color){ 20, 20, 20,180};
-            DrawRectangle(OX + x*TILE, OY + y*TILE, TILE-1, TILE-1, c);
-            
-            // Dessin de la trace par-dessus le couloir
-            if (MAP[y][x] == 0 && TRACES[y][x] > 0) {
-                Color traceColor = { 255, 255, 255, (unsigned char)(TRACES[y][x] * 100) }; 
-                DrawRectangle(OX + x*TILE, OY + y*TILE, TILE-1, TILE-1, traceColor);
-            }
-
-            if (MAP[y][x]==2) DrawRectangle(OX + x*TILE, OY + y*TILE, TILE-1, TILE-1, GOLD);
-        }
-    }
-
-    // Joueur
-    int ppx = OX + (int)(px * TILE);
-    int ppy = OY + (int)(py * TILE);
-    DrawCircle(ppx, ppy, 3, YELLOW);
-
-    // Direction
-    DrawLine(ppx, ppy,
-             ppx + (int)(cosf(angle) * 10),
-             ppy + (int)(sinf(angle) * 10),
-             YELLOW);
-
-    // Lumières patrouilles
-    for (int i = 0; i < PATROL_LIGHTS; i++) {
-        int lpx = OX + (int)(patrolLights[i].l->x * TILE);
-        int lpy = OY + (int)(patrolLights[i].l->y * TILE);
-        //Color lc = (i == 0) ? (Color){255, 200, 50, 255} : (Color){50, 150, 255, 255};
-        Color lc = (Color){(int)(fminf(patrolLights[i].l->r, 1.0f) * 255.0), 
-                           (int)(fminf(patrolLights[i].l->g, 1.0f) * 255.0), 
-                           (int)(fminf(patrolLights[i].l->b, 1.0f) * 255.0), 255};
-        DrawCircle(lpx, lpy, 4, lc);
-
-        // Direction de la lumière
-        DrawLine(lpx, lpy,
-                lpx + (int)(patrolLights[i].dx * 8),
-                lpy + (int)(patrolLights[i].dy * 8),
-                lc);
-    }
-}
-
-
+#pragma region RENDU
 // =============================================================
 //  Fonction de rendu à utiliser dans RenderFrame
 // =============================================================
@@ -1853,7 +1866,10 @@ void RenderSprites(Context ctx, float px, float py, float angle)
         }
     }
 }
+#pragma endregion
 
+
+#pragma region ANIMATION LUMIERES
 // =============================================================
 //  Gestion de l'animation des lumières
 // =============================================================
@@ -1974,8 +1990,10 @@ void AnimLights(float px, float py, float angle, float dt) {
     }
     else lights[2] = (Light){0};
 }
+#pragma endregion
 
 
+#pragma region GAME STATE
 // =============================================================
 //  Machine à état pour le jeu
 // =============================================================
@@ -2061,8 +2079,10 @@ void GState(GameState gameState, float* px, float* py, Sound tada, Sound siren){
             break;
     }
 }
+#pragma endregion
 
 
+#pragma region MAIN
 // =============================================================
 //  Programme principal
 // =============================================================
@@ -2278,3 +2298,4 @@ int main(void)
     CloseWindow();
     return 0;
 }
+#pragma endregion
